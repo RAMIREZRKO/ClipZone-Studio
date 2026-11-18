@@ -1,0 +1,3 @@
+# Fase 2, opcional. No es necesario para editar o exportar.
+-r requirements.txt
+openai-whisper>=20240930
