@@ -77,7 +77,7 @@ def test_rolling_buffer_respects_time_bytes_and_pinned_segments(tmp_path):
     assert len(pinned) == 3
     fourth = push(3)
     assert first.exists() and not any(item.path == first for item in buffer.closed)
-    buffer.release()
+    buffer.release(pinned)
     assert not first.exists() and second.exists() and third.exists() and fourth.exists()
     next_generation = push(0, generation=1)
     assert [item.path for item in buffer.closed] == [next_generation]

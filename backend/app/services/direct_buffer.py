@@ -1,6 +1,6 @@
 """Ventana de segmentos cerrados. El propietario serializa acceso y borrados."""
-from collections import deque
-from dataclasses import dataclass
+from collections import Counter, deque
+from dataclasses import dataclass, replace
 import csv
 from math import isfinite
 from pathlib import Path
@@ -9,6 +9,7 @@ import re
 SESSION_NAME = re.compile(r"[a-f0-9]{32}")
 SEGMENT_NAME = re.compile(r"g[0-9]{2}-[0-9]{8}\.mkv")
 PLAYLIST_NAME = "snapshot.ffconcat"
+AUTO_PLAYLIST = "autoclip.ffconcat"
 BUFFER_SECONDS = 300
 
 
@@ -25,7 +26,8 @@ class DirectBuffer:
         self.folder = folder
         self.max_seconds = max_seconds
         self.closed: deque[Segment] = deque()
-        self.pins: set[Path] = set()
+        self.pins: Counter[Path] = Counter()
+        self.epoch = 0
         self.retired: set[Path] = set()
         self.bytes = 0
 
@@ -55,6 +57,7 @@ class DirectBuffer:
             if previous.generation != generation or difference <= 0 or difference > max(20, previous.duration * 3):
                 self.retired.update(item.path for item in self.closed)
                 self.closed.clear()
+                self.epoch += 1
             else:
                 # La referencia de vídeo del siguiente segmento evita sumar
                 # padding de audio en cada unión al usar el demuxer concat.
@@ -95,25 +98,30 @@ class DirectBuffer:
         for segment in reversed(self.closed):
             if chosen and duration + segment.duration > seconds + .06:
                 break
-            # Copia los metadatos: la próxima publicación puede ajustar la duración
-            # de la última entrada del búfer mientras FFmpeg escribe el MP4.
-            chosen.append(Segment(segment.path, segment.generation, segment.start, segment.duration))
+            chosen.append(segment)
             duration += segment.duration
-        self.pins.update(item.path for item in chosen)
-        return tuple(reversed(chosen))
+        return self.hold(reversed(chosen))
 
-    def release(self) -> None:
-        self.pins.clear()
+    def hold(self, segments) -> tuple[Segment, ...]:
+        frozen = tuple(replace(item) for item in segments)
+        self.pins.update(item.path for item in frozen)
+        return frozen
+
+    def release(self, segments) -> None:
+        for item in segments:
+            self.pins[item.path] -= 1
+            if self.pins[item.path] <= 0:
+                del self.pins[item.path]
         self.reap()
 
     def discard_incomplete(self, generation: int) -> None:
-        keep = {item.path for item in self.closed} | self.pins
+        keep = {item.path for item in self.closed} | self.pins.keys()
         self.retired.update(path for path in self.folder.glob(f"g{generation:02d}-*.mkv")
                             if SEGMENT_NAME.fullmatch(path.name) and path not in keep)
         self.reap()
 
     def reap(self) -> None:
-        for path in self.retired - self.pins:
+        for path in self.retired - self.pins.keys():
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -121,11 +129,12 @@ class DirectBuffer:
             self.retired.remove(path)
 
 
-def clean_session(folder: Path) -> None:
+def clean_session(folder: Path, preserve=()) -> None:
     if not SESSION_NAME.fullmatch(folder.name) or folder.is_symlink() or folder.resolve() != folder or not folder.is_dir():
         return
     for child in folder.iterdir():
-        if SEGMENT_NAME.fullmatch(child.name) or child.name == PLAYLIST_NAME:
+        if child not in preserve and (SEGMENT_NAME.fullmatch(child.name) or child.name == PLAYLIST_NAME or
+                                      child.name == AUTO_PLAYLIST and not preserve):
             try:
                 child.unlink(missing_ok=True)
             except OSError:
@@ -134,4 +143,11 @@ def clean_session(folder: Path) -> None:
         folder.rmdir()
     except OSError:
         pass
+
+
+def write_playlist(path: Path, segments: tuple[Segment, ...]) -> None:
+    lines = ["ffconcat version 1.0"]
+    for segment in segments:
+        lines.extend((f"file {segment.path.name}", f"duration {segment.duration:.6f}"))
+    path.write_text("\n".join(lines) + "\n", encoding="ascii")
 

@@ -3,6 +3,7 @@ import { ArrowDownToLine, CheckCheck, CircleHelp, FileText, LoaderCircle, Play, 
 import { request, seconds, type AICapabilities, type Analysis, type AnalysisOptions, type AnalysisResult, type Job, type Moment, type RenderOptions, type Video } from '../api';
 import { presets } from '../presets';
 import { bytes } from './StoragePanel';
+import { NumericInput } from './NumericInput';
 
 interface Props {
   video: Video | null;
@@ -92,6 +93,10 @@ export function AnalysisPanel({ video, output, onChoose, onExported, renderBlock
     return () => { alive = false; };
   }, [active?.id, active?.status]);
 
+  function editOption<Key extends keyof AnalysisOptions>(key: Key, value: AnalysisOptions[Key]) {
+    setOptions(previous => ({ ...previous, [key]: value }));
+  }
+
   async function analyze() {
     if (!video || !ready || running || busy) return;
     setError('');
@@ -139,7 +144,7 @@ export function AnalysisPanel({ video, output, onChoose, onExported, renderBlock
       <div className="analysis-controls">
         <h3>Encuentra lo que merece un clip.</h3>
         <p>Transcribe el vídeo y descubre fragmentos para revisar y compartir.</p>
-        <label>Modelo<select aria-label="Modelo Whisper" value={options.model} onChange={e => setOptions({ ...options, model: e.target.value })}>
+        <label>Modelo<select aria-label="Modelo Whisper" value={options.model} onChange={e => editOption('model', e.target.value)}>
           {!capabilities && <option value={options.model}>Comprobando modelos…</option>}
           {capabilities?.models.map(m => <option key={m.id} value={m.id}>{m.label.split(' · ')[0]} · {m.installed ? 'instalado' : m.integrity === 'invalid' ? 'archivo dañado' : m.integrity === 'unreadable' ? 'no se puede leer' : 'sin instalar'}</option>)}
         </select></label>
@@ -158,18 +163,22 @@ export function AnalysisPanel({ video, output, onChoose, onExported, renderBlock
         {download?.status === 'failed' && <p className="field-note">Registro local en <code>data/whisper-downloads.log</code>.</p>}
         {download?.status === 'cancelled' && <p className="field-note">Descarga cancelada.</p>}
         <label>Procesamiento en CPU<select aria-label="Hilos de Whisper" value={options.cpu_threads ?? 4}
-          onChange={event => setOptions({ ...options, cpu_threads: Number(event.target.value) })}>
+          onChange={event => editOption('cpu_threads', Number(event.target.value))}>
           <option value={2}>2 hilos · menor carga</option><option value={4}>4 hilos · recomendado</option><option value={6}>6 hilos · más CPU</option>
         </select></label>
-        <label>Idioma del audio<select aria-label="Idioma del audio" value={options.language} onChange={e => setOptions({ ...options, language: e.target.value })}>
+        <label>Idioma del audio<select aria-label="Idioma del audio" value={options.language} onChange={e => editOption('language', e.target.value)}>
           <option value="auto">Detectar automáticamente</option><option value="es">Español</option><option value="en">Inglés</option><option value="pt">Portugués</option><option value="fr">Francés</option><option value="de">Alemán</option><option value="it">Italiano</option>
         </select></label>
         {data && <p className="field-note">
           {active?.options.language === 'auto' ? 'Idioma detectado del audio' : 'Idioma del audio (selección manual)'}: {data.transcript.language === 'auto' ? 'Indeterminado' : data.transcript.language.toUpperCase()}.
         </p>}
-        <div className="analysis-duration"><label>Mínimo (s)<input aria-label="Duración mínima IA" type="number" min={1} max={180} step={1} value={options.min_duration} onChange={e => setOptions({ ...options, min_duration: +e.target.value })}/></label><label>Máximo (s)<input aria-label="Duración máxima IA" type="number" min={1} max={180} step={1} value={options.max_duration} onChange={e => setOptions({ ...options, max_duration: +e.target.value })}/></label></div>
-        <label>Máximo de propuestas<input aria-label="Máximo de propuestas" type="number" min={1} max={20} value={options.max_clips} onChange={e => setOptions({ ...options, max_clips: +e.target.value })}/></label>
-        <label className="analysis-checkbox"><input type="checkbox" checked={options.reuse_transcript} onChange={e => setOptions({ ...options, reuse_transcript: e.target.checked })}/>Reutilizar transcripción si ya existe</label>
+        <div className="analysis-duration"><label>Mínimo (s)<NumericInput aria-label="Duración mínima IA" min={1} max={180} precision={2} step={1}
+          value={options.min_duration} onCommit={value => editOption('min_duration', value)}/></label>
+          <label>Máximo (s)<NumericInput aria-label="Duración máxima IA" min={1} max={180} precision={2} step={1}
+            value={options.max_duration} onCommit={value => editOption('max_duration', value)}/></label></div>
+        <label>Máximo de propuestas<NumericInput aria-label="Máximo de propuestas" min={1} max={20}
+          value={options.max_clips} onCommit={value => editOption('max_clips', value)}/></label>
+        <label className="analysis-checkbox"><input type="checkbox" checked={options.reuse_transcript} onChange={e => editOption('reuse_transcript', e.target.checked)}/>Reutilizar transcripción si ya existe</label>
         {!engineReady && capabilities && <div className="ai-setup"><CircleHelp size={16}/><div><strong>Instala el motor local de Whisper</strong><p>Ejecuta este comando en PowerShell desde la carpeta del proyecto.</p><code>{capabilities.install_command}</code></div></div>}
         {video && !video.has_audio && <p className="analysis-warning">Este vídeo no tiene pista de audio.</p>}
         <button className="primary" disabled={!video || !video.has_audio || !ready || !!running || busy} onClick={() => void analyze()}>{busy ? <LoaderCircle className="spin" size={16}/> : <Sparkles size={16}/>}Analizar vídeo</button>

@@ -5,5 +5,6 @@ import './styles.css';
 import './readability.css';
 import './phase3.css';
 import './live.css';
+import './split-framing.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

@@ -9,7 +9,7 @@
   border: 1px solid #50664a; color: var(--text); background: #0d150b; min-height: 37px;
   border-radius: 6px; padding: 6px 9px; max-width: 100%; font-size: 14px;
 }
-.phase-body input[type=number] { width: 86px; }
+.phase-body [data-numeric-input] { width: 86px; }
 .phase-body input[type=file] { width: min(250px, 100%); }
 .phase-body textarea { width: 100%; min-height: 60px; resize: vertical; }
 .phase-body input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--green); vertical-align: middle; }

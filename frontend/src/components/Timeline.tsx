@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type 
 import { Film, Minus, Plus } from 'lucide-react';
 import { type Video } from '../api';
 import { earliestClipEnd, formatTimecode, latestClipStart, roundTimelineTime } from '../timelineTime';
+import { NumericInput } from './NumericInput';
 
 type Handle = 'cursor' | 'in' | 'out';
 type Drag = { handle: Handle; pointerId: number; offset: number; frame: number };
@@ -178,10 +179,10 @@ export function Timeline({ video, start, end, current, title, seek, setIn, setOu
       {video && <details className="timeline-precision">
         <summary>Ajuste de precisión</summary>
         <div className="timeline-precision-fields">
-          <label>Entrada (s)<input aria-label="Entrada en segundos" type="number" min={0} max={maxIn} step="0.01"
-            value={roundTimelineTime(start)} onChange={event => setIn(event.target.valueAsNumber)}/></label>
-          <label>Salida (s)<input aria-label="Salida en segundos" type="number" min={minOut} max={duration} step="0.01"
-            value={roundTimelineTime(end)} onChange={event => setOut(event.target.valueAsNumber)}/></label>
+          <label>Entrada (s)<NumericInput aria-label="Entrada en segundos" min={0} max={maxIn} precision={2}
+            value={roundTimelineTime(start)} onCommit={setIn}/></label>
+          <label>Salida (s)<NumericInput aria-label="Salida en segundos" min={minOut} max={duration} precision={2}
+            value={roundTimelineTime(end)} onCommit={setOut}/></label>
         </div>
         <p>Flechas sobre un control: 0,01 s. Mayús + flecha: 1 s.</p>
       </details>}

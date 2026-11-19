@@ -33,7 +33,7 @@ class Settings:
 
     def prepare(self) -> None:
         root = self.data_dir.resolve()
-        for folder in ("uploads", "previews", "thumbnails", "exports", "analysis", "drafts", "quarantine", "graphics", "live-inbox", "direct-buffer"):
+        for folder in ("uploads", "previews", "thumbnails", "exports", "analysis", "drafts", "quarantine", "graphics", "live-inbox", "direct-buffer", "autoclips"):
             path = root / folder
             if path.resolve() != path:
                 raise ValueError(f"El directorio administrado {folder} apunta fuera de su ubicación esperada.")

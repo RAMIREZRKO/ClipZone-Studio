@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDownToLine, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, ChevronRight, CircleHelp, Clapperboard, Clock3, Crop, Download, Film, FolderOpen, Frame, HardDrive, LayoutGrid, LoaderCircle, Maximize, Monitor, Pause, Play, Plus, Radio, Scissors, Settings2, ShieldCheck, SkipBack, Upload, Volume2, VolumeX, WandSparkles, X } from 'lucide-react';
-import { request, seconds, sizeLabel, uploadVideo, type CaptionTrack, type ClipSettings, type GraphicLayer, type Health, type Job, type RenderOptions, type Video } from './api';
+import { request, seconds, sizeLabel, uploadVideo, type CaptionTrack, type ClipSettings, type GraphicLayer, type Health, type Job, type RenderOptions, type SourceGeometry, type SplitLayout, type Video } from './api';
 import { Modal } from './components/Modal';
 import { ratios, presets, statusLabel } from './presets';
 import { AnalysisPanel } from './components/AnalysisPanel';
 import { Timeline } from './components/Timeline';
+import { NumericInput } from './components/NumericInput';
 import { earliestClipEnd, formatTimecode, latestClipStart, MIN_CLIP_SECONDS, roundTimelineTime } from './timelineTime';
 import { BlurBackdrop } from './components/BlurBackdrop';
 import { SubtitlesPanel } from './components/SubtitlesPanel';
@@ -12,6 +13,8 @@ import { captionPresets } from './components/CaptionAppearance';
 import { CaptionOverlay } from './components/CaptionOverlay';
 import { CampaignPanel, GraphicOverlay } from './components/CampaignPanel';
 import { LivePanel, type LiveDestination } from './components/LivePanel';
+import { defaultSplitLayout, normalizeSplitLayout, SplitCanvas, SplitControls, SplitRegionEditor } from './components/SplitFraming';
+import { emptyGameplay, splitGeometry } from './splitFramingGeometry';
 
 import { RemoveButton, RemoveDialog, SelectionBar, StoragePanel, type RemovalTarget } from './components/StoragePanel';
 
@@ -25,6 +28,22 @@ const pageCopy: Record<View, { eyebrow?: string; heading: string; description: s
   live: { heading: 'ClipZone Live', description: 'Guarda fragmentos de directos autorizados mediante captura directa u OBS Studio.' },
 };
 const liveTargets = { editor: 'clip-editor', analysis: 'ai-moments', subtitles: 'captions-editor', export: 'clip-export' };
+const playerVolumeKey = 'clipzone.player.volume';
+
+function readPlayerVolume() {
+  const fallback = { level: 100, lastAudibleLevel: 100 };
+  try {
+    const saved = JSON.parse(localStorage.getItem(playerVolumeKey) ?? 'null');
+    if (!saved || !Number.isInteger(saved.level) || saved.level < 0 || saved.level > 100) return fallback;
+    const level: number = saved.level;
+    const lastAudibleLevel: number = saved.lastAudibleLevel;
+    return { level, lastAudibleLevel: level || (
+      Number.isInteger(lastAudibleLevel) && lastAudibleLevel > 0 && lastAudibleLevel <= 100 ? lastAudibleLevel : 100
+    ) };
+  } catch {
+    return fallback;
+  }
+}
 
 export default function App() {
   const [view, setView] = useState<View>('editor');
@@ -37,13 +56,19 @@ export default function App() {
   const [platform, setPlatform] = useState('tiktok'); const [ratio, setRatio] = useState('9:16');
   const [resolution, setResolution] = useState(1080); const [fit, setFit] = useState<ClipSettings['fit']>('contain');
   const [blur, setBlur] = useState(55);
+  const [splitLayout, setSplitLayout] = useState<SplitLayout>(defaultSplitLayout);
+  const [splitDraft, setSplitDraft] = useState<{ base: SplitLayout; layout: SplitLayout } | null>(null);
+  const [splitRegion, setSplitRegion] = useState<'camera' | 'gameplay'>('camera');
+  const [sourceGeometry, setSourceGeometry] = useState<{ url: string; ratio: number } | null>(null);
+  const [legacyGeometry, setLegacyGeometry] = useState<{ id: string; source: SourceGeometry | null } | null>(null);
   const [monitor, setMonitor] = useState<'live' | 'original' | 'exact'>('live');
   const [previewRequest, setPreviewRequest] = useState<{ id: string; key: string } | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [safeTop, setSafeTop] = useState(10); const [safeBottom, setSafeBottom] = useState(22);
   const [focusX, setFocusX] = useState(50); const [focusY, setFocusY] = useState(50);
   const [guides, setGuides] = useState(true); const [playing, setPlaying] = useState(false);
-  const [muted, setMuted] = useState(false); const [current, setCurrent] = useState(0);
+  const [playerVolume, setPlayerVolume] = useState(readPlayerVolume);
+  const [current, setCurrent] = useState(0);
   const [uploading, setUploading] = useState<number | null>(null); const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(''); const [notice, setNotice] = useState('');
   const [roadmap, setRoadmap] = useState(false); const [help, setHelp] = useState(false);
@@ -65,6 +90,30 @@ export default function App() {
   const captionTrack = captionState?.track ?? null;
   const needsCaptionTrack = captionsEnabled || captionSidecars;
   const captionRenderBlocked = needsCaptionTrack && !!captionState?.dirty;
+  const ratioNumber = Number(ratio.split(':')[0]) / Number(ratio.split(':')[1]);
+  const outputWidth = ratioNumber > 1 ? Math.round(resolution * ratioNumber / 2) * 2 : resolution;
+  const outputHeight = ratioNumber > 1 ? resolution : Math.round(resolution / ratioNumber / 2) * 2;
+  const splitPreview = splitDraft?.base === splitLayout ? splitDraft.layout : splitLayout;
+  const sourceWidth = selected?.width;
+  const sourceHeight = selected?.height;
+  const displayWidth = selected?.display_width;
+  const savedGeometry = legacyGeometry?.id === selectedId ? legacyGeometry : null;
+  const splitSource = useMemo(() => sourceWidth && sourceHeight && displayWidth
+    ? { width: sourceWidth, height: sourceHeight, display_width: displayWidth } : savedGeometry?.source,
+  [sourceWidth, sourceHeight, displayWidth, savedGeometry]);
+  const splitPlan = useMemo(() => fit === 'split' && splitSource
+    ? splitGeometry(splitPreview, outputWidth, outputHeight, splitSource) : null,
+  [fit, splitPreview, outputWidth, outputHeight, splitSource]);
+  const splitStatus = splitSource ? emptyGameplay : savedGeometry ? 'No se pudieron leer las dimensiones del original.' : 'Leyendo dimensiones del original…';
+
+  useEffect(() => {
+    if (fit !== 'split' || !selectedId || displayWidth || savedGeometry) return;
+    const controller = new AbortController();
+    request<SourceGeometry>(`/videos/${selectedId}/geometry`, { signal: controller.signal })
+      .then(source => { if (!controller.signal.aborted) setLegacyGeometry({ id: selectedId, source }); })
+      .catch(() => { if (!controller.signal.aborted) setLegacyGeometry({ id: selectedId, source: null }); });
+    return () => controller.abort();
+  }, [fit, selectedId, displayWidth, savedGeometry]);
 
   function saveTrack(track: CaptionTrack) {
     setTracks(previous => ({ ...previous, [track.id]: { track, dirty: false } }));
@@ -89,7 +138,7 @@ export default function App() {
   const exports = jobs.filter(j => j.kind === 'export');
   const active = exports.filter(j => j.status === 'queued' || j.status === 'running');
   const canExport = !!selected && health?.status === 'ok' && end - start >= MIN_CLIP_SECONDS - 1e-9 && end <= selected.duration + 0.01 && end - start <= 3600
-    && !captionRenderBlocked;
+    && !captionRenderBlocked && (fit !== 'split' || !!splitPlan);
   const removableExports = exports.filter(job => job.status !== 'queued' && job.status !== 'running');
   const markedVideos = videos.filter(video => selectedVideos.includes(video.id));
   const markedExports = removableExports.filter(job => selectedExports.includes(job.id));
@@ -116,7 +165,7 @@ export default function App() {
   }
 
   const renderOptions = { ratio, resolution, fit, platform, safe_top: safeTop, safe_bottom: safeBottom,
-    focus_x: focusX, focus_y: focusY, blur_strength: blur,
+    focus_x: focusX, focus_y: focusY, blur_strength: blur, split_layout: fit === 'split' ? splitPreview : null,
     graphics,
     captions: needsCaptionTrack && captionTrack?.revision ? {
       enabled: captionsEnabled, sidecars: captionSidecars, style: captionStyle, language: captionLanguage, revision: captionTrack.revision,
@@ -125,6 +174,8 @@ export default function App() {
     setRatio(options.ratio); setResolution(options.resolution); setFit(options.fit); setPlatform(options.platform);
     setSafeTop(options.safe_top); setSafeBottom(options.safe_bottom); setFocusX(options.focus_x); setFocusY(options.focus_y);
     setBlur(options.blur_strength ?? 55);
+    setSplitLayout(normalizeSplitLayout(options.split_layout));
+    setSplitDraft(null);
     setCaptionsEnabled(options.captions?.enabled ?? false);
     setCaptionSidecars(options.captions?.sidecars ?? false);
     setCaptionLanguage(options.captions?.language ?? 'original');
@@ -139,6 +190,27 @@ export default function App() {
   const exactReady = exact && draft?.status === 'completed';
   const sourceUrl = exact ? (exactReady ? draft.preview_url : null) : selected?.preview_url;
   const sourceOffset = exactReady ? start : 0;
+  const volume = playerVolume.level;
+  const muted = volume === 0;
+
+  useLayoutEffect(() => {
+    if (player.current) player.current.volume = volume / 100;
+  }, [volume, sourceUrl, view]);
+
+  useEffect(() => {
+    try { localStorage.setItem(playerVolumeKey, JSON.stringify(playerVolume)); }
+    catch { /* La sesión conserva el ajuste si el navegador bloquea el almacenamiento. */ }
+  }, [playerVolume]);
+
+  function changeVolume(level: number) {
+    setPlayerVolume(previous => ({ level, lastAudibleLevel: level || previous.lastAudibleLevel }));
+  }
+
+  function toggleMute() {
+    setPlayerVolume(previous => ({ ...previous, level: previous.level === 0 ? previous.lastAudibleLevel : 0 }));
+  }
+
+  const audioAction = muted ? 'Activar sonido' : 'Silenciar';
 
   useEffect(() => {
     if (exact && !exactReady) setPlaying(false);
@@ -176,6 +248,7 @@ export default function App() {
 
   function selectVideo(video: Video) {
     player.current?.pause(); setPlaying(false); setMonitor('live'); setSelectedId(video.id); setStart(0);
+    setSplitDraft(null);
     setEnd(Math.min(presets[platform].duration, video.duration)); setCurrent(0);
     setTitle(`${video.name.replace(/\.[^.]+$/, '')} · clip 01`.slice(0, 100)); setView('editor'); setError('');
   }
@@ -184,10 +257,11 @@ export default function App() {
     setVideos(previous => previous.some(item => item.id === video.id) ? previous : [video, ...previous]);
   }, []);
 
-  function openCapturedVideo(video: Video, destination: LiveDestination) {
+  function openCapturedVideo(video: Video, destination: LiveDestination, options?: RenderOptions) {
     addCapturedVideo(video);
     selectVideo(video);
     setEnd(video.duration);
+    if (options) applyComposition(options);
     window.setTimeout(() => {
       const target = document.getElementById(liveTargets[destination]);
       target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -267,10 +341,9 @@ export default function App() {
     try { const updated = await request<Job>(`/jobs/${id}/cancel`, { method: 'POST' }); setJobs(j => j.map(item => item.id === id ? updated : item)); }
     catch (e) { setError((e as Error).message); }
   }
-  const ratioNumber = Number(ratio.split(':')[0]) / Number(ratio.split(':')[1]);
-  const outputWidth = ratioNumber > 1 ? Math.round(resolution * ratioNumber / 2) * 2 : resolution;
-  const outputHeight = ratioNumber > 1 ? resolution : Math.round(resolution / ratioNumber / 2) * 2;
-  const displayRatio = monitor === 'original' && selected ? selected.width / selected.height : outputWidth / outputHeight;
+  const displayRatio = monitor === 'original' && selected
+    ? (sourceGeometry && sourceGeometry.url === sourceUrl ? sourceGeometry.ratio : (selected.display_width ?? selected.width) / selected.height)
+    : outputWidth / outputHeight;
 
   function updatePlayback() {
     const video = player.current;
@@ -339,10 +412,14 @@ export default function App() {
                     {sourceUrl ? <>
                       {monitor === 'live' && fit === 'blur' && <BlurBackdrop player={player} source={sourceUrl} aspect={displayRatio} strength={blur}/>}
                       <video key={sourceUrl} ref={player} src={sourceUrl} muted={muted} playsInline preload="auto"
+                        className={monitor === 'live' && fit === 'split' ? 'split-source-video' : undefined}
                         style={{ objectFit: monitor === 'live' && fit === 'cover' ? 'cover' : 'contain',
                           objectPosition: monitor === 'live' && fit === 'cover' ? `${focusX}% ${focusY}%` : '50% 50%' }}
                         onLoadedMetadata={() => {
                           if (player.current) {
+                            if (!exact && player.current.videoHeight) {
+                              setSourceGeometry({ url: sourceUrl, ratio: player.current.videoWidth / player.current.videoHeight });
+                            }
                             const position = exact ? Math.max(start, Math.min(end, current)) : current;
                             player.current.currentTime = position - sourceOffset;
                           }
@@ -350,13 +427,21 @@ export default function App() {
                         onTimeUpdate={updatePlayback} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
                         onEnded={() => setPlaying(false)} onClick={() => void togglePlay()}
                         onError={() => setError('No se pudo reproducir el archivo de vista previa.')}/>
+                      {fit === 'split' && monitor === 'live' && (splitPlan && splitSource
+                        ? <SplitCanvas player={player} source={sourceUrl} geometry={splitPlan} inverted={splitPreview.inverted}
+                          sourceGeometry={splitSource}/>
+                        : <div className="processing-preview" role="status">{splitStatus}</div>)}
+                      {fit === 'split' && monitor === 'original' && <SplitRegionEditor layout={splitPreview} selected={splitRegion}
+                        onSelect={setSplitRegion} onRect={(key, rect) => setSplitLayout(previous => ({
+                          ...previous, [key]: { ...previous[key], rect },
+                        }))}/>}
                     </> : <div className="processing-preview">
                       {exact ? <>
                         {preparing || draft?.status === 'running' || draft?.status === 'queued' ? <>
                           <LoaderCircle className="spin" size={24}/><span role="status">Renderizando · {draft?.progress ?? 0}%</span>
                           {draft && <button className="secondary" onClick={() => void cancelJob(draft.id)}>Cancelar vista previa</button>}
                         </> : <>
-                          <span>{captionRenderBlocked ? 'Guarda los subtítulos para actualizar Vista exacta.' : draft?.error ? 'Falló el render de la vista previa.' : 'Genera la vista con los ajustes actuales.'}</span>
+                          <span>{fit === 'split' && !splitPlan ? splitStatus : captionRenderBlocked ? 'Guarda los subtítulos para actualizar Vista exacta.' : draft?.error ? 'Falló el render de la vista previa.' : 'Genera la vista con los ajustes actuales.'}</span>
                           <button className="secondary" disabled={!canExport} onClick={() => void preparePreview()}>Generar vista exacta</button>
                         </>}
                       </> : <span>{selected.preview_status === 'processing' ? 'Preparando vídeo…' : 'El archivo de vista previa no está disponible.'}</span>}
@@ -366,12 +451,33 @@ export default function App() {
                         select={setActiveGraphic} move={(id, x, y) => setGraphics(previous => previous.map(layer => layer.id === id ? { ...layer, x, y } : layer))}/>}
                     {monitor === 'live' && sourceUrl && captionsEnabled && captionTrack && <CaptionOverlay segments={captionTrack.segments}
                       time={current} playing={playing} style={captionStyle} language={captionLanguage} ratio={ratio} resolution={resolution} safeTop={safeTop} safeBottom={safeBottom}
+                      splitLayout={fit === 'split' ? (splitPreview.camera_share === splitLayout.camera_share ? splitLayout : splitPreview) : null}
                       clipStart={start} clipEnd={end}/>}
                     {guides && monitor === 'live' && <div className="safe-guides" style={{ top: `${safeTop}%`, bottom: `${safeBottom}%` }}><span>ZONA SEGURA</span><div className="safe-caption">Guía de subtítulos</div></div>}
                   </div>
                 </> : <div className="empty-stage"><div className="stage-corner tl"/><div className="stage-corner tr"/><div className="stage-corner bl"/><div className="stage-corner br"/><div className="upload-illustration"><div className="film-back"/><div className="film-front"><Film size={35}/></div><span><Plus size={17}/></span></div><h3>Tu próximo clip empieza aquí</h3><p>Arrastra un vídeo o búscalo en tu equipo.<br/>Los mejores momentos ya están dentro.</p><button className="primary" onClick={() => input.current?.click()} disabled={uploading !== null}>{uploading !== null ? <LoaderCircle className="spin" size={16}/> : <Upload size={16}/>} {uploading === null ? 'Seleccionar vídeo' : uploading < 100 ? `Importando ${uploading}%` : 'Analizando vídeo…'}</button><span className="file-formats">MP4, MOV, MKV, WebM y más · Hasta {health ? Math.round(health.max_upload_bytes / 1024 ** 3) : 20} GB</span></div>}
               </div>
-              <div className="transport"><div className="transport-left"><button className="icon-button" disabled={!selected} onClick={() => seek(start)} aria-label="Ir al inicio del clip" title="Ir al inicio del clip"><SkipBack size={17}/></button><button className="play-button" aria-label={playing ? 'Pausar' : 'Reproducir clip'} title={playing ? 'Pausar' : 'Reproducir clip'} disabled={!sourceUrl} onClick={() => void togglePlay()}>{playing ? <Pause size={17} fill="currentColor"/> : <Play size={17} fill="currentColor"/>}</button><button className="icon-button" disabled={!selected} onClick={() => setMuted(!muted)} aria-label={muted ? 'Activar sonido' : 'Silenciar'} title={muted ? 'Activar sonido' : 'Silenciar'}>{muted ? <VolumeX size={17}/> : <Volume2 size={17}/>}</button></div><div className="timecode"><strong>{formatTimecode(current, true)}</strong><span>/</span>{formatTimecode(selected?.duration || 0, true)}</div><button className="icon-button" disabled={!selected} aria-label="Pantalla completa" title="Pantalla completa" onClick={() => { void player.current?.closest('.stage')?.requestFullscreen(); }}><Maximize size={16}/></button></div>
+              <div className="transport">
+                <div className="transport-left">
+                  <button className="icon-button" disabled={!selected} onClick={() => seek(start)}
+                    aria-label="Ir al inicio del clip" title="Ir al inicio del clip"><SkipBack size={17}/></button>
+                  <button className="play-button" aria-label={playing ? 'Pausar' : 'Reproducir clip'}
+                    title={playing ? 'Pausar' : 'Reproducir clip'} disabled={!sourceUrl} onClick={() => void togglePlay()}>
+                    {playing ? <Pause size={17} fill="currentColor"/> : <Play size={17} fill="currentColor"/>}
+                  </button>
+                </div>
+                <div className="transport-audio">
+                  <button className="icon-button" disabled={!selected} onClick={toggleMute} aria-label={audioAction} title={audioAction}>
+                    {muted ? <VolumeX size={17}/> : <Volume2 size={17}/>}
+                  </button>
+                  <input type="range" min={0} max={100} step={1} value={volume} disabled={!selected}
+                    aria-label="Volumen del reproductor" aria-valuetext={volume + '%'} onChange={event => changeVolume(event.target.valueAsNumber)}/>
+                  <output aria-hidden="true">{volume}%</output>
+                </div>
+                <div className="timecode"><strong>{formatTimecode(current, true)}</strong><span>/</span>{formatTimecode(selected?.duration || 0, true)}</div>
+                <button className="icon-button transport-fullscreen" disabled={!selected} aria-label="Pantalla completa" title="Pantalla completa"
+                  onClick={() => { void player.current?.closest('.stage')?.requestFullscreen(); }}><Maximize size={16}/></button>
+              </div>
             </section>
             <section className="timeline-panel panel"><div className="panel-heading"><div><Scissors size={17}/><h2>Elige tu momento</h2></div><div className="duration-badge"><Clock3 size={13}/>{(selected ? end - start : 0).toFixed(2)} s seleccionados</div></div><div className="timeline-body"><div className="clip-fields"><label className="clip-title">Nombre del clip<input value={title} maxLength={100} onChange={e => setTitle(e.target.value)} placeholder="Nombre del clip"/></label></div>
               <Timeline key={selectedId ?? 'empty'} video={selected} start={start} end={end} current={current} title={title} seek={scrub} setIn={setIn} setOut={setOut}/>
@@ -383,9 +489,13 @@ export default function App() {
               <div className="panel-heading"><div><Settings2 size={17}/><h2>Configura tu clip</h2></div><span className="small-tag">MP4</span></div>
               <div className="settings-body"><section className="setting-section"><div className="field-heading"><label>Destino</label><span>Preset de edición</span></div><div className="platform-grid">{Object.entries(presets).filter(([key]) => key !== 'custom').map(([key, p]) => <button key={key} className={platform === key ? 'chosen' : ''} onClick={() => applyPlatform(key)} aria-pressed={platform === key}><b>{p.symbol}</b>{p.label}</button>)}</div><button className={`custom-preset ${platform === 'custom' ? 'chosen' : ''}`} onClick={() => applyPlatform('custom')} aria-pressed={platform === 'custom'}>↗ Formato libre</button></section>
                 <section className="setting-section"><div className="field-heading"><label>Formato</label><span>Relación de aspecto</span></div><div className="ratio-grid">{ratios.map(r => <button key={r} className={ratio === r ? 'chosen' : ''} onClick={() => setRatio(r)} aria-pressed={ratio === r}><span className="ratio-shape" style={{ aspectRatio: r.replace(':', ' / ') }}/><span>{r}</span>{ratio === r && <Check size={11} className="ratio-check"/>}</button>)}</div></section>
-                <section className="setting-section"><div className="field-heading"><label>Encuadre</label><Crop size={14}/></div><div className="segmented"><button className={fit === 'contain' ? 'chosen' : ''} onClick={() => setFit('contain')} aria-pressed={fit === 'contain'}>Ajustar completo</button><button className={fit === 'cover' ? 'chosen' : ''} onClick={() => setFit('cover')} aria-pressed={fit === 'cover'}>Llenar y recortar</button><button className={fit === 'blur' ? 'chosen' : ''} aria-pressed={fit === 'blur'} onClick={() => setFit('blur')}>Fondo difuminado</button></div>{fit === 'blur' && <label className="blur-control">Intensidad <input aria-label="Intensidad del desenfoque" type="range" min="0" max="100" value={blur} onChange={e => setBlur(+e.target.value)}/><output>{blur}%</output></label>}{fit === 'cover' && <div className="focus-controls"><label>Foco horizontal <input aria-label="Foco horizontal" type="range" min="0" max="100" value={focusX} onChange={e => setFocusX(+e.target.value)}/></label><label>Foco vertical <input aria-label="Foco vertical" type="range" min="0" max="100" value={focusY} onChange={e => setFocusY(+e.target.value)}/></label></div>}<p className="field-note">{fit === 'contain' ? 'Conserva toda la imagen con bandas negras.' : fit === 'cover' ? 'Desplaza el foco para elegir qué parte conservar.' : 'La imagen completa se muestra sobre un fondo ampliado.'}</p></section>
+                <section className="setting-section"><div className="field-heading"><label>Encuadre</label><Crop size={14}/></div><div className="segmented"><button className={fit === 'contain' ? 'chosen' : ''} onClick={() => setFit('contain')} aria-pressed={fit === 'contain'}>Ajustar completo</button><button className={fit === 'cover' ? 'chosen' : ''} onClick={() => setFit('cover')} aria-pressed={fit === 'cover'}>Llenar y recortar</button><button className={fit === 'blur' ? 'chosen' : ''} aria-pressed={fit === 'blur'} onClick={() => setFit('blur')}>Fondo difuminado</button><button className={fit === 'split' ? 'chosen' : ''} aria-pressed={fit === 'split'} onClick={() => { setFit('split'); leaveExactPreview(); }}>Streamer + Gameplay</button></div>{fit === 'blur' && <label className="blur-control">Intensidad <input aria-label="Intensidad del desenfoque" type="range" min="0" max="100" value={blur} onChange={e => setBlur(+e.target.value)}/><output>{blur}%</output></label>}{fit === 'cover' && <div className="focus-controls"><label>Foco horizontal <input aria-label="Foco horizontal" type="range" min="0" max="100" value={focusX} onChange={e => setFocusX(+e.target.value)}/></label><label>Foco vertical <input aria-label="Foco vertical" type="range" min="0" max="100" value={focusY} onChange={e => setFocusY(+e.target.value)}/></label></div>}{fit === 'split' && <SplitControls layout={splitLayout} onChange={setSplitLayout} selected={splitRegion}
+                  onPreview={layout => setSplitDraft(layout ? { base: splitLayout, layout } : null)}
+                  onSelect={setSplitRegion} canEdit={!!sourceUrl || !!selected?.preview_url}
+                  onEditSource={() => { player.current?.pause(); setMonitor('original'); document.querySelector('.preview-panel')?.scrollIntoView({ block: 'center' }); }}/>}
+                {fit !== 'split' && <p className="field-note">{fit === 'contain' ? 'Conserva toda la imagen con bandas negras.' : fit === 'cover' ? 'Desplaza el foco para elegir qué parte conservar.' : 'La imagen completa se muestra sobre un fondo ampliado.'}</p>}</section>
                 <section className="setting-section resolution-row"><label htmlFor="resolution">Resolución</label><div className="select-wrap"><select id="resolution" value={resolution} onChange={e => setResolution(+e.target.value)}><option value={1080}>1080p · Full HD</option><option value={720}>720p · HD</option><option value={480}>480p · Ligero</option></select><ChevronDown size={13}/></div></section>
-                <section className="setting-section safe-section"><div className="field-heading"><label htmlFor="safe-guides">Zona segura de subtítulos</label><button id="safe-guides" role="switch" aria-checked={guides} aria-label="Guías de zona segura" className={`switch ${guides ? 'on' : ''}`} onClick={() => setGuides(!guides)}><span/></button></div><div className="safe-inputs"><label>Superior<div><input aria-label="Margen superior" type="number" min="0" max="35" value={safeTop} onChange={e => setSafeTop(Math.min(35, Math.max(0, +e.target.value)))}/><span>%</span></div></label><label>Inferior<div><input aria-label="Margen inferior" type="number" min="0" max="40" value={safeBottom} onChange={e => setSafeBottom(Math.min(40, Math.max(0, +e.target.value)))}/><span>%</span></div></label></div><p className="field-note">Guías orientativas, no se imprimen en el vídeo.<br/>Para añadir texto sincronizado, abre Subtítulos dinámicos.</p></section>
+                <section className="setting-section safe-section"><div className="field-heading"><label htmlFor="safe-guides">Zona segura de subtítulos</label><button id="safe-guides" role="switch" aria-checked={guides} aria-label="Guías de zona segura" className={`switch ${guides ? 'on' : ''}`} onClick={() => setGuides(!guides)}><span/></button></div><div className="safe-inputs"><label>Superior<div><NumericInput aria-label="Margen superior" min={0} max={35} value={safeTop} onCommit={setSafeTop}/><span>%</span></div></label><label>Inferior<div><NumericInput aria-label="Margen inferior" min={0} max={40} value={safeBottom} onCommit={setSafeBottom}/><span>%</span></div></label></div><p className="field-note">Guías orientativas, no se imprimen en el vídeo.<br/>Para añadir texto sincronizado, abre Subtítulos dinámicos.</p></section>
               </div>
             </aside>
             <div className="export-panel panel" id="clip-export"><div className="export-summary"><div className="export-icon"><Download size={20}/></div><div><strong>Listo para tu siguiente historia</strong><span>{outputWidth} × {outputHeight} · H.264 + AAC · MP4</span></div></div><button className="primary export-button" disabled={!canExport || submitting} onClick={() => void exportClip()}>{submitting ? <LoaderCircle className="spin" size={17}/> : <ArrowDownToLine size={17}/>}Exportar clip<ArrowRight size={16}/></button><span className="export-note"><HardDrive size={12}/>Se guarda en este equipo</span></div>
@@ -393,9 +503,13 @@ export default function App() {
           </div>
           <SubtitlesPanel key={selectedId ?? 'empty'} video={selected} track={captionTrack} dirty={!!captionState?.dirty}
             enabled={captionsEnabled} setEnabled={setCaptionsEnabled} time={current} sidecars={captionSidecars} setSidecars={setCaptionSidecars}
-            style={captionStyle} setStyle={setCaptionStyle} language={captionLanguage} setLanguage={setCaptionLanguage} onTrack={saveTrack} onSeek={seekInEditor}
-            setSegments={segments => {
-              if (captionTrack) setTracks(previous => ({ ...previous, [captionTrack.id]: { track: { ...captionTrack, segments }, dirty: true } }));
+            style={captionStyle} setStyle={setCaptionStyle} splitFraming={fit === 'split'} language={captionLanguage} setLanguage={setCaptionLanguage} onTrack={saveTrack} onSeek={seekInEditor}
+            setSegments={update => {
+              if (captionTrack) setTracks(previous => {
+                const track = previous[captionTrack.id]?.track ?? captionTrack;
+                const segments = typeof update === 'function' ? update(track.segments) : update;
+                return { ...previous, [track.id]: { track: { ...track, segments }, dirty: true } };
+              });
             }}/>
           <CampaignPanel layers={graphics} options={{
             ...renderOptions,

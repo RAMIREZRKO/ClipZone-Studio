@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { request, type CaptionSegment, type CaptionStyle } from '../api';
+import { request, type CaptionSegment, type CaptionStyle, type SplitLayout } from '../api';
 
 interface CaptionPage {
   start: number;
@@ -10,13 +10,15 @@ interface CaptionPage {
 
 const PRELOAD_SECONDS = 1.25;
 
-export function CaptionOverlay({ segments, time, playing, style, language, ratio, resolution, safeTop, safeBottom, clipStart, clipEnd }: {
+export function CaptionOverlay({ segments, time, playing, style, language, ratio, resolution, safeTop, safeBottom, clipStart, clipEnd, splitLayout }: {
   segments: CaptionSegment[]; time: number; playing: boolean; style: CaptionStyle; language: string;
   ratio: string; resolution: number; safeTop: number; safeBottom: number; clipStart: number; clipEnd: number;
+  splitLayout: SplitLayout | null;
 }) {
   const config = useMemo(() => ({
     ratio, resolution, safe_top: safeTop, safe_bottom: safeBottom, start: clipStart, end: clipEnd, style, language,
-  }), [ratio, resolution, safeTop, safeBottom, clipStart, clipEnd, style, language]);
+    fit: splitLayout ? 'split' : 'contain', split_layout: splitLayout,
+  }), [ratio, resolution, safeTop, safeBottom, clipStart, clipEnd, style, language, splitLayout]);
   const [layers, setLayers] = useState<{ config: typeof config; segment: CaptionSegment; page: CaptionPage }[]>([]);
   const [failure, setFailure] = useState<{ config: typeof config; segment: CaptionSegment; message: string } | null>(null);
   const requests = useRef(new Map<CaptionSegment, AbortController>());

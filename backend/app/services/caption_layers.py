@@ -51,7 +51,7 @@ class CaptionLayers:
             return {"start": min(start, body.time), "end": rounded_start if body.time < rounded_start else max(end, body.time),
                     "frames": [], "images": []}
         dimensions = body.dimensions()
-        position = caption_position(body.style, dimensions, body.safe_top, body.safe_bottom)
+        position = caption_position(body.style, dimensions, body.safe_top, body.safe_bottom, body.caption_seam())
         indexes = {}
         frames = []
         for start, end, text in selected.frames:

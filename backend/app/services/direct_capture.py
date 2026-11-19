@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..config import Settings
 from ..database import now
-from .direct_buffer import PLAYLIST_NAME, DirectBuffer, Segment, clean_session
+from .direct_buffer import PLAYLIST_NAME, DirectBuffer, Segment, clean_session, write_playlist
 from .direct_source import QUALITY, DirectSource, StreamlinkSource, source_from_url, terminate_tree
 from .library import VideoLibrary
 from .media import CREATE_NO_WINDOW, MediaError
@@ -108,7 +108,7 @@ class DirectCapture:
             if free is None or free < MIN_FREE:
                 raise LiveError("direct_disk", "Se necesitan al menos 128 MiB libres para iniciar el búfer.", 507)
             if self.session:
-                clean_session(self.session.buffer.folder)
+                clean_session(self.session.buffer.folder, self.session.buffer.pins)
             folder = self.root / uuid4().hex
             try:
                 folder.mkdir()
@@ -298,8 +298,14 @@ class DirectCapture:
             raise LiveError("direct_storage", "No se pudo escribir el fragmento. Revisa el espacio y los permisos.", 507) from exc
         finally:
             with self.lock:
-                session.buffer.release()
+                session.buffer.release(segments)
                 self.saving = False
+
+    def release_segments(self, session: CaptureSession, segments: tuple[Segment, ...]) -> None:
+        with self.lock:
+            session.buffer.release(segments)
+            if self.session is not session:
+                clean_session(session.buffer.folder, session.buffer.pins)
 
     def save_snapshot(self, session: CaptureSession, segments: tuple[Segment, ...], seconds: int) -> tuple[dict, dict]:
         folder = session.buffer.folder
@@ -312,10 +318,7 @@ class DirectCapture:
             raise LiveError("direct_size", "El fragmento supera el límite de importación de ClipZone.", 413)
         if (self.disk_free() or 0) < size + MIN_FREE:
             raise LiveError("direct_disk", "Falta espacio para guardar el fragmento. El búfer y los clips guardados se conservan.", 507)
-        lines = ["ffconcat version 1.0"]
-        for segment in segments:
-            lines += [f"file {segment.path.name}", f"duration {segment.duration:.6f}"]
-        playlist.write_text("\n".join(lines) + "\n", encoding="ascii")
+        write_playlist(playlist, segments)
         captured_at = now()
         platform = {"kick": "Kick", "twitch": "Twitch"}.get(session.source.platform, "Live")
         capture = {"method": "direct", "platform": session.source.platform, "quality": session.quality,

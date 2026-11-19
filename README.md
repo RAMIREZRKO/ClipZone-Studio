@@ -55,7 +55,7 @@ Diagnóstico independiente:
 | Recorte | Línea de tiempo con tiradores de entrada y salida, cursor independiente, zoom de 1× a 32× y ajuste por centésimas |
 | Previsualización | Original, encuadre en directo y vista exacta renderizada con los ajustes de exportación |
 | Formatos | 9:16, 1:1, 4:5 y 16:9 |
-| Encuadre | Imagen completa con bandas, recorte para llenar con foco manual y fondo difuminado con intensidad regulable |
+| Encuadre | Imagen completa con bandas, recorte para llenar con foco manual, fondo difuminado y modo dividido Streamer + Gameplay |
 | Resolución | 480, 720 o 1080 píxeles en el lado corto; dimensiones pares para H.264 |
 | Plataformas | Cuatro plataformas: TikTok, Instagram Reels, YouTube Shorts y Facebook Reels, más modo libre |
 | Zona segura | Márgenes superior/inferior editables para colocar subtítulos. Las guías de edición se ocultan en el render |
@@ -100,7 +100,20 @@ Arrastra los tiradores verdes para ajustar la entrada y la salida. Haz clic en l
 
 Los tiempos se muestran en horas, minutos y segundos, con centésimas en los controles. Usa **+** y **−** para ajustar el zoom hasta 32×. En el cursor y los tiradores, las flechas avanzan o retroceden 0,01 s y **Mayús + flecha** ajusta 1 s. En **Ajuste de precisión** puedes escribir los límites en segundos.
 
-## ClipZone Live 2.0
+## Encuadre Streamer + Gameplay
+
+1. Importa un vídeo que ya incluya la cámara del streamer. En **Configura tu clip → Encuadre**, selecciona **Streamer + Gameplay**.
+2. Pulsa **Editar regiones en Original**. Elige **Cámara** o **Gameplay** para mover su rectángulo y ajustar sus esquinas. También puedes escribir **X**, **Y**, **Ancho** y **Alto** en **Coordenadas del recorte**.
+3. Selecciona la distribución, de 20/80 a 50/50 entre los presets, o usa **Distribución personalizada** para asignar entre 10% y 90% a la cámara. Marca **Invertir cámara y gameplay** para mostrar la cámara abajo.
+4. Ajusta el zoom y el desplazamiento X/Y de cada región. Ambos paneles se llenan mediante recorte y el panel de gameplay usa exclusivamente la parte de su selección que queda fuera de la cámara. **Restablecer encuadre** recupera la distribución, el orden, el zoom y el desplazamiento iniciales y conserva los rectángulos seleccionados. Vuelve a **Encuadre en directo** para revisar ambas regiones.
+5. En **Subtítulos dinámicos → Estilo y posición de subtítulos**, elige **Entre cámara y gameplay** o **Posición manual**. Ajusta la posición horizontal sobre el lienzo y la posición vertical dentro de la zona segura configurada. Los logos y textos promocionales se posicionan sobre todo el lienzo.
+6. Usa **Vista exacta** para revisar el render final y **Exportar clip** para obtener el MP4. Las tres vistas parten de los mismos rectángulos y dimensiones de composición.
+
+En **Gráficos y plantillas**, guarda el encuadre con un nombre como «Westcol · vertical», «Auronplay · directo» o «TheDonato · gameplay» después de ajustar las regiones a la fuente. Las coordenadas se guardan como proporciones del original, así que sirven también al cambiar la resolución de una fuente con la misma composición. Si la cámara cambia de posición entre emisiones, actualiza el rectángulo en la plantilla.
+
+Las propuestas de **Momentos con IA** usan el encuadre actual para exportar varios clips. En **ClipZone Live → AutoClipping IA**, la opción **Plantilla para editar candidatos** aparece al guardar una plantilla con encuadre dividido. Selecciónala y pulsa **Editar** en un candidato para abrirlo con esa composición. La captura automática conserva el fragmento fuente y el encuadre se aplica al exportar.
+
+## ClipZone Live 3.0
 
 **Captura directa** mantiene el búfer de un canal público y autorizado de **Kick** o **Twitch** en el servidor local de ClipZone. Puedes cerrar la pestaña o el navegador después de iniciar la captura. Mantén el servidor de ClipZone en ejecución.
 
@@ -127,6 +140,17 @@ Se admite una captura directa simultánea. Streamlink usa sus conectores integra
 El búfer conserva una ventana de hasta cinco minutos más el segmento de corte cuando es necesario. El límite de disco es **512 MiB** por defecto. Se retiran los segmentos antiguos y se reservan **128 MiB** libres. La captura realiza hasta **tres reintentos** por sesión. Cuando se restablece la conexión, el nuevo material inicia un búfer continuo, sin concatenar el hueco con los segmentos anteriores.
 
 **YouTube Live.** El conector de Streamlink contempla directos HLS y formatos con audio y video separados. Se mantiene fuera de la captura directa hasta validar esas variantes y las condiciones de acceso. Para emisiones autorizadas sigue disponible el método OBS. [Conectores de Streamlink](https://streamlink.github.io/latest/plugins.html) · [Conector de YouTube](https://github.com/streamlink/streamlink/blob/8.6.3/src/streamlink/plugins/youtube.py) · [Segmentador de FFmpeg](https://ffmpeg.org/ffmpeg-formats.html#segment_002c-stream_005fsegment_002c-ssegment).
+
+### AutoClipping IA
+
+1. Instala el detector local de voz con `.\.venv\Scripts\python.exe -m pip install -r backend/requirements-autoclip.txt` y reinicia ClipZone. Usa un modelo de Whisper verificado del panel **Momentos con IA**. **Tiny** es el recomendado para comenzar. También puedes elegir **Base** o **Small**.
+2. Inicia una transmisión autorizada desde **Captura directa** y activa **AutoClipping IA**. Elige una duración de **30, 60 o 90 s**, la sensibilidad, el umbral editorial, los segundos anteriores y posteriores, la frecuencia mínima y el máximo por hora.
+3. El detector compara la intensidad con el nivel reciente y busca actividad compatible con voz. Puede indicar una posible reacción vocal intensa. Los picos por sí solos no identifican risas ni gritos. Whisper transcribe hasta **24 s** de contexto alrededor del evento. La puntuación de **0 a 100** estima el interés editorial a partir del audio, la voz, el gancho, el contexto, la continuidad y el cierre.
+4. Revisa los candidatos con **Reproducir**, **Conservar** o **Descartar**. **Editar** conserva el candidato, lo incorpora a **Mis vídeos** y abre el editor. Puedes seguir usando la captura manual y exportar desde el editor.
+
+La duración seleccionada es un máximo. La ventana termina tras los segundos posteriores configurados y se extiende hacia atrás hasta la duración elegida. **Segundos anteriores** es el mínimo que debe existir antes del evento. Si hay una reconexión antes de completar la ventana, se descarta esa ventana para evitar unir instantes discontinuos. El sistema limita los solapamientos, mantiene un solo candidato a la vez y comparte un único proceso Whisper con el análisis manual. El procesado en directo usa CPU y dos hilos para Whisper. Si el trabajador está ocupado, se omite el candidato. OBS sigue disponible para captura manual.
+
+Hay **512 MiB** para candidatos pendientes de revisar, separados del búfer directo. Conservar o descartar libera su espacio temporal. Al alcanzar el límite se omiten nuevos candidatos para que puedas revisar los que ya están guardados. Los clips conservados se administran desde la biblioteca. [Detector de voz WebRTC para Python](https://github.com/daanzu/py-webrtcvad-wheels).
 
 ### Método alternativo con OBS Studio
 

@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 
-TABLES = {"videos", "jobs", "analyses", "removals", "caption_tracks", "templates", "assets"}
+TABLES = {"videos", "jobs", "analyses", "removals", "caption_tracks", "templates", "assets", "autoclips"}
 
 
 def now() -> str:
@@ -27,6 +27,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS live_captures (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS autoclips (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             """)
 
     def connect(self):
@@ -44,16 +45,18 @@ class Database:
             row = conn.execute(f"SELECT payload FROM {table} WHERE id=?", (identifier,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def list(self, table: str) -> list[dict]:
+    def list(self, table: str, limit: int = -1) -> list[dict]:
         assert table in TABLES
         with self.connect() as conn:
-            rows = conn.execute(f"SELECT payload FROM {table} ORDER BY rowid DESC").fetchall()
+            rows = conn.execute(f"SELECT payload FROM {table} ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def put_live_video(self, video: dict, capture: dict) -> None:
+    def put_live_video(self, video: dict, capture: dict, candidate: dict | None = None) -> None:
         with self.connect() as conn:
             conn.execute("INSERT INTO videos (id,payload) VALUES (?,?)", (video["id"], json.dumps(video)))
             conn.execute("INSERT INTO live_captures (id,payload) VALUES (?,?)", (capture["id"], json.dumps(capture)))
+            if candidate is not None:
+                conn.execute("UPDATE autoclips SET payload=? WHERE id=?", (json.dumps(candidate), candidate["id"]))
 
     def live_captures(self) -> list[tuple[dict, dict | None]]:
         with self.connect() as conn:

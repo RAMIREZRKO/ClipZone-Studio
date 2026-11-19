@@ -1,7 +1,7 @@
 """Cola independiente para Whisper; conserva transcripciones y permite reutilizarlas."""
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import RLock
+from threading import Event, Lock, RLock
 import json
 import os
 import subprocess
@@ -16,6 +16,7 @@ from ..config import ROOT, Settings
 from ..database import Database, now
 from ..models import AnalysisRequest
 from .media import CREATE_NO_WINDOW
+from .direct_source import terminate_tree
 
 
 class AnalysisCancelled(Exception):
@@ -26,6 +27,7 @@ class AnalysisQueue:
     def __init__(self, db: Database, settings: Settings):
         self.db, self.settings = db, settings
         self.lock = RLock()
+        self.whisper_slot = Lock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipzone-ai")
         self.processes: dict[str, subprocess.Popen] = {}
         self.closed = False
@@ -135,8 +137,9 @@ class AnalysisQueue:
                            "-i", video["source_path"], "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
                            "-f", "s16le", "-progress", "pipe:1", "-nostats", str(audio)]
                 self._process(identifier, command, whisper=False, duration=video["duration"])
-                self._process(identifier, self._worker_command(audio, self.settings.model_dir / f"{options.model}.pt", options.language, output),
-                              whisper=True, duration=video["duration"], cpu_threads=options.cpu_threads)
+                with self.whisper_slot:
+                    self._process(identifier, self._worker_command(audio, self.settings.model_dir / f"{options.model}.pt", options.language, output),
+                                  whisper=True, duration=video["duration"], cpu_threads=options.cpu_threads)
                 transcript = json.loads(output.read_text(encoding="utf-8"))
             self._check(identifier)
             self._update(identifier, progress=95, stage="Detectando y puntuando momentos")
@@ -157,6 +160,33 @@ class AnalysisQueue:
                     self._update(identifier, status="failed", stage="No se pudo analizar", error=str(exc)[-2000:])
         finally:
             self._cleanup(identifier)
+
+    def transcribe_live(self, audio: Path, model: str, output: Path, stop: Event) -> dict | None:
+        with self.lock:
+            if self.closed or stop.is_set() or any(item["status"] in {"queued", "running"} for item in self.db.list("analyses")):
+                return None
+            if not self.whisper_slot.acquire(blocking=False):
+                return None
+        try:
+            env = {**os.environ, "PYTHONPATH": str(ROOT / "backend"), "PYTHONUTF8": "1",
+                   "CLIPZONE_WHISPER_THREADS": "2", "OMP_NUM_THREADS": "2"}
+            command = self._worker_command(audio, self.settings.model_dir / f"{model}.pt", "auto", output)
+            deadline = time.monotonic() + {"tiny": 50, "base": 80, "small": 120}[model]
+            with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  env=env, creationflags=CREATE_NO_WINDOW, start_new_session=os.name != "nt") as process:
+                try:
+                    while process.poll() is None:
+                        if stop.wait(.2) or self.closed:
+                            return None
+                        if time.monotonic() > deadline:
+                            raise RuntimeError("Whisper superó el tiempo disponible para un candidato.")
+                    if process.returncode:
+                        raise RuntimeError("Whisper no pudo transcribir el candidato con el modelo elegido.")
+                    return json.loads(output.read_text(encoding="utf-8"))
+                finally:
+                    terminate_tree(process)
+        finally:
+            self.whisper_slot.release()
 
     def cancel(self, identifier: str):
         with self.lock:

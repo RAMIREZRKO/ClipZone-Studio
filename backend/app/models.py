@@ -3,6 +3,7 @@ from enum import Enum
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 from .composition import CaptionOptions, GraphicLayer
+from .split_layout import SplitLayout
 
 
 class Ratio(str, Enum):
@@ -15,7 +16,8 @@ class Ratio(str, Enum):
 class RenderOptions(BaseModel):
     ratio: Ratio = Ratio.portrait
     resolution: int = Field(default=1080)
-    fit: Literal["contain", "cover", "blur"] = "contain"
+    fit: Literal["contain", "cover", "blur", "split"] = "contain"
+    split_layout: SplitLayout | None = None
     blur_strength: int = Field(default=55, ge=0, le=100)
     platform: str = Field(default="tiktok", pattern="^(tiktok|reels|shorts|facebook|custom)$")
     safe_top: int = Field(default=10, ge=0, le=35)
@@ -31,7 +33,12 @@ class RenderOptions(BaseModel):
             raise ValueError("La resolución debe ser 480, 720 o 1080.")
         if len({layer.id for layer in self.graphics}) != len(self.graphics):
             raise ValueError("Hay capas gráficas repetidas.")
+        if self.fit == "split" and self.split_layout is None:
+            self.split_layout = SplitLayout()
         return self
+
+    def caption_seam(self) -> int | None:
+        return self.split_layout.seam(self.dimensions()[1]) if self.fit == "split" and self.split_layout else None
 
     def dimensions(self) -> tuple[int, int]:
         a, b = map(int, self.ratio.value.split(":"))

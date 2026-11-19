@@ -18,10 +18,12 @@ from fastapi.staticfiles import StaticFiles
 from .config import Settings
 from .database import Database
 from .models import ClipRequest
+from .split_layout import SPLIT_RENDER_VERSION
 from .services.media import MediaError, MediaService
 from .services.caption_layers import CaptionLayerRequest, CaptionLayers
 from .services.jobs import JobQueue
 from .services.direct_capture import DirectCapture
+from .services.autoclip import AutoClip, register_autoclip
 from .services.library import SUPPORTED_VIDEO, VideoLibrary
 from .services.live import LiveCapture, register_live
 from .services.analysis import AnalysisQueue
@@ -72,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                          app.state.export_lock, app.state.active_uploads)
         app.state.live = LiveCapture(settings, app.state.library)
         app.state.direct = DirectCapture(settings, app.state.library)
+        app.state.autoclip = AutoClip(app.state.direct, app.state.analysis_queue)
         # Archivos parciales nunca se muestran como vídeos importados.
         for path in (settings.data_dir / "uploads").glob("*.part"):
             if ID.fullmatch(path.stem):
@@ -80,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except (ValueError, OSError):
                     logger.warning("Un archivo parcial quedó pendiente de limpieza.")
         yield
+        await asyncio.to_thread(app.state.autoclip.shutdown)
         await asyncio.to_thread(app.state.direct.shutdown)
         await asyncio.to_thread(app.state.analysis_queue.shutdown)
         await asyncio.to_thread(app.state.queue.shutdown)
@@ -164,6 +168,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Sin miniatura.")
         return FileResponse(video["thumbnail_path"], media_type="image/jpeg")
 
+    @app.get("/api/videos/{identifier}/geometry")
+    def video_geometry(identifier: str):
+        video = find_video(identifier)
+        return app.state.media.source_geometry(Path(video["source_path"]), video)
+
     def render_captions(body: ClipRequest):
         options = body.captions
         if not options or not (options.enabled or options.sidecars):
@@ -178,8 +187,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def live_caption_layer(body: CaptionLayerRequest):
         return app.state.caption_layers.page(body)
 
-    def caption_cache_version(body: ClipRequest) -> dict:
-        return {"caption_render_version": CAPTION_RENDER_VERSION} if body.captions and body.captions.enabled else {}
+    def render_versions(body: ClipRequest) -> dict:
+        versions = {}
+        if body.captions and body.captions.enabled:
+            versions["caption_render_version"] = CAPTION_RENDER_VERSION
+        if body.fit == "split":
+            versions["split_render_version"] = SPLIT_RENDER_VERSION
+        return versions
 
     def enqueue_clip(body: ClipRequest, provenance: dict | None = None, kind: str = "export"):
         video = find_video(body.video_id)
@@ -191,7 +205,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cues = render_captions(body)
         auxiliary = {}
         if cues and body.captions.enabled:
-            auxiliary["overlay.ass"] = ass_script(cues, body.captions.style, body.dimensions(), body.safe_top, body.safe_bottom)
+            auxiliary["overlay.ass"] = ass_script(cues, body.captions.style, body.dimensions(), body.safe_top,
+                                                  body.safe_bottom, body.caption_seam())
         layers = []
         duration = body.end - body.start
         for index, layer in enumerate(body.graphics):
@@ -204,12 +219,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 name = f"graphic{index}.ass"
                 auxiliary[name] = graphic_ass(layer, body.dimensions(), end)
                 layers.append((layer, name))
-        command = app.state.media.render_command(Path(video["source_path"]), output, body,
-                                                   use_ass="overlay.ass" in auxiliary, layers=layers)
+        source = Path(video["source_path"])
+        media = app.state.media
+        geometry = media.source_geometry(source, video) if body.fit == "split" else None
+        command = media.render_command(source, output, body, use_ass="overlay.ass" in auxiliary,
+                                       layers=layers, source_geometry=geometry)
         sidecars = [{"start": cue["start"], "end": cue["end"], "text": cue["text"]} for cue in cues] if cues and body.captions.sidecars and kind == "export" else None
         job = app.state.queue.submit(kind=kind, video_id=video["id"], command=command, output=output,
                                      duration=body.end - body.start, title=body.title.strip() or "Mi clip",
-                                     settings={**body.model_dump(mode="json"), **(provenance or {}), **caption_cache_version(body)},
+                                     settings={**body.model_dump(mode="json"), **(provenance or {}), **render_versions(body)},
                                      auxiliary=auxiliary, sidecar_cues=sidecars)
         return public_job(job)
 
@@ -227,7 +245,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if body.captions is not None:
                 render_captions(body)
             pending = 0
-            options = {**body.model_dump(mode="json", exclude={"title"}), **caption_cache_version(body)}
+            options = {**body.model_dump(mode="json", exclude={"title"}), **render_versions(body)}
             for job in app.state.db.list("jobs"):
                 active = job["status"] in ("queued", "running")
                 pending += active
@@ -247,6 +265,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_campaigns(app, settings)
     register_storage(app)
     register_live(app, public_video)
+    register_autoclip(app, public_video)
 
     @app.get("/api/jobs")
     def jobs():

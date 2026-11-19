@@ -10,7 +10,7 @@ Color = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
 Font = Literal["Arial", "Segoe UI", "Verdana", "Tahoma", "Impact"]
 Alignment = Literal["left", "center", "right"]
 CaptionLanguage = Literal["original"] | Language
-CAPTION_RENDER_VERSION = 2
+CAPTION_RENDER_VERSION = 3
 
 
 class CaptionStyle(BaseModel):
@@ -25,6 +25,8 @@ class CaptionStyle(BaseModel):
     background: Color = "#000000"
     background_opacity: int = Field(default=0, ge=0, le=100)
     align: Alignment = "center"
+    anchor: Literal["safe", "split"] = "safe"
+    position_x: int | None = Field(default=None, ge=0, le=100)
     position: int = Field(default=90, ge=0, le=100)
     words_per_line: int = Field(default=5, ge=1, le=12)
 
@@ -94,7 +96,7 @@ def wrap_words(tokens: list[str], limit: int) -> str:
     return r"\N".join(" ".join(tokens[i:i + limit]) for i in range(0, len(tokens), limit))
 
 
-def caption_position(style: CaptionStyle, dimensions, safe_top: int, safe_bottom: int) -> str:
+def caption_position(style: CaptionStyle, dimensions, safe_top: int, safe_bottom: int, seam: int | None = None) -> str:
     width, height = dimensions
     factor = min(width, height) / 1080
     font_size = max(12, round(style.size * factor))
@@ -103,8 +105,13 @@ def caption_position(style: CaptionStyle, dimensions, safe_top: int, safe_bottom
     pad = min(height * (100 - safe_top - safe_bottom) / 200, font_size * 1.22 + decoration * factor)
     top = height * safe_top / 100 + pad
     bottom = height * (100 - safe_bottom) / 100 - pad
-    x = round(width * {"left": .08, "center": .5, "right": .92}[style.align])
+    x_ratio = {"left": .08, "center": .5, "right": .92}[style.align]
+    if seam is not None and style.position_x is not None:
+        x_ratio = style.position_x / 100
+    x = round(width * x_ratio)
     y = round(top + (bottom - top) * style.position / 100)
+    if style.anchor == "split" and seam is not None:
+        y = round(max(top, min(bottom, seam)))
     anchor = {"left": 4, "center": 5, "right": 6}[style.align]
     # Coordinates describe the composed canvas, including bars or a blurred background.
     safe_y0 = (height * safe_top + 99) // 100
@@ -157,8 +164,8 @@ def caption_rows(start, end, text, box, position) -> list[str]:
     ) if row]
 
 
-def caption_events(cues, style: CaptionStyle, dimensions, safe_top: int, safe_bottom: int) -> list[str]:
-    position = caption_position(style, dimensions, safe_top, safe_bottom)
+def caption_events(cues, style: CaptionStyle, dimensions, safe_top: int, safe_bottom: int, seam: int | None = None) -> list[str]:
+    position = caption_position(style, dimensions, safe_top, safe_bottom, seam)
     events = []
     for page in caption_pages(cues, style):
         if page.box:
@@ -193,8 +200,8 @@ def ass_header(style: CaptionStyle, dimensions) -> str:
     return "\n".join(header) + "\n"
 
 
-def ass_script(cues, style: CaptionStyle, dimensions, safe_top: int, safe_bottom: int) -> str:
-    events = caption_events(cues, style, dimensions, safe_top, safe_bottom)
+def ass_script(cues, style: CaptionStyle, dimensions, safe_top: int, safe_bottom: int, seam: int | None = None) -> str:
+    events = caption_events(cues, style, dimensions, safe_top, safe_bottom, seam)
     return ass_header(style, dimensions) + "".join(row + "\n" for row in events)
 
 

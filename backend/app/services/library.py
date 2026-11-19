@@ -59,7 +59,7 @@ class VideoLibrary:
             with self.lock:
                 self.active_uploads.discard(identifier)
 
-    def finish(self, staged: StagedVideo, name: str, live: dict | None = None) -> dict:
+    def finish(self, staged: StagedVideo, name: str, live: dict | None = None, candidate: dict | None = None) -> dict:
         metadata = self.media.probe(staged.partial)
         staged.partial.replace(staged.source)
         size = staged.source.stat().st_size
@@ -78,7 +78,7 @@ class VideoLibrary:
                 self.db.put("videos", video)
             else:
                 self.db.put_live_video(video, {**live, "id": staged.id, "name": name,
-                                               "duration": video["duration"], "size": size})
+                                               "duration": video["duration"], "size": size}, candidate)
             staged.committed = True
             if command:
                 try:

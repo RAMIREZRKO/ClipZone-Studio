@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { Captions, Plus, Save } from 'lucide-react';
 import { request, seconds, type Analysis, type CaptionSegment, type CaptionStyle, type CaptionTrack, type Video } from '../api';
 import { CaptionAppearance } from './CaptionAppearance';
+import { NumericInput } from './NumericInput';
 
 const json = (body: unknown): RequestInit => ({
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -23,12 +24,13 @@ async function readSubtitleFile(file: File) {
   catch { return new TextDecoder('windows-1252').decode(buffer); }
 }
 
-export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, language, time, setEnabled, setSidecars, setStyle, setLanguage, setSegments, onTrack, onSeek }: {
+export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, splitFraming, language, time, setEnabled, setSidecars, setStyle, setLanguage, setSegments, onTrack, onSeek }: {
   video: Video | null; track: CaptionTrack | null; dirty: boolean; enabled: boolean; time: number;
-  setEnabled: (enabled: boolean) => void; setSegments: (segments: CaptionSegment[]) => void;
+  setEnabled: (enabled: boolean) => void; setSegments: Dispatch<SetStateAction<CaptionSegment[]>>;
   onTrack: (track: CaptionTrack) => void; onSeek: (time: number) => void;
   sidecars: boolean; setSidecars: (enabled: boolean) => void;
-  style: CaptionStyle; setStyle: (style: CaptionStyle) => void;
+  style: CaptionStyle; setStyle: Dispatch<SetStateAction<CaptionStyle>>;
+  splitFraming: boolean;
   language: string; setLanguage: (language: string) => void;
 }) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
@@ -79,7 +81,7 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
   }
 
   function update(index: number, patch: Partial<CaptionSegment>) {
-    setSegments(segments.map((segment, i) => i === index ? { ...segment, ...patch } : segment));
+    setSegments(previous => previous.map((segment, i) => i === index ? { ...segment, ...patch } : segment));
   }
 
   function split(index: number) {
@@ -184,7 +186,7 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
           Los segmentos sin traducción se omiten al exportar este idioma.
         </p>}
         {dirty && <p className="field-note">Guarda la pista para usar los cambios en Vista exacta y en la exportación.</p>}
-        <CaptionAppearance style={style} onChange={setStyle}/>
+        <CaptionAppearance style={style} onChange={setStyle} split={splitFraming}/>
         <div className="phase-toolbar">
           <label>Transcripción de origen<select value={analysisId} onChange={e => setAnalysisId(e.target.value)}>
             <option value="">Sin análisis seleccionado</option>
@@ -212,8 +214,10 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
             return <article className="caption-row" key={segment.id}>
               <div className="phase-toolbar">
                 <button className="secondary" title="Ir al segmento" onClick={() => onSeek(segment.start)}>{seconds(segment.start)}</button>
-                <label>Inicio <input type="number" min={0} step=".01" value={segment.start} onChange={e => update(index, { start: +e.target.value })}/></label>
-                <label>Final <input type="number" min={0} step=".01" value={segment.end} onChange={e => update(index, { end: +e.target.value })}/></label>
+                <label>Inicio <NumericInput min={0} max={video.duration} precision={3} step={.01}
+                  value={segment.start} onCommit={start => update(index, { start })}/></label>
+                <label>Final <NumericInput min={.01} max={video.duration} precision={3} step={.01}
+                  value={segment.end} onCommit={end => update(index, { end })}/></label>
               </div>
               <label>Texto del segmento {index + 1}<textarea maxLength={600} value={segment.text} onChange={e => update(index, { text: e.target.value })}/></label>
               {translating && <label>Traducción del segmento {index + 1}<textarea value={segment.translations[language] ?? ''}

@@ -5,6 +5,7 @@ from pathlib import Path
 from ..config import Settings
 from ..composition import GraphicLayer
 from ..models import ClipRequest
+from ..split_layout import EMPTY_GAMEPLAY, SourceGeometry, split_geometry, split_graph
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -39,13 +40,20 @@ class MediaService:
             if not 0 < duration < 7 * 24 * 3600:
                 raise MediaError("No se pudo determinar una duración válida (máximo 7 días).")
             width, height = int(stream["width"]), int(stream["height"])
+            sar_width, _, sar_height = stream.get("sample_aspect_ratio", "").partition(":")
+            numerator, denominator = (int(sar_width), int(sar_height)) if sar_width.isdecimal() and sar_height.isdecimal() else (1, 1)
+            if not numerator or not denominator:
+                numerator, denominator = 1, 1
             rotation = int(float(stream.get("tags", {}).get("rotate", 0)))
             for side in stream.get("side_data_list", []):
                 rotation = int(float(side.get("rotation", rotation)))
             if abs(rotation) % 180 == 90:
                 width, height = height, width
+                numerator, denominator = denominator, numerator
+            display_width = max(2, 2 * (width * numerator // (2 * denominator)))
             audio = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
-            return {"duration": duration, "width": width, "height": height, "codec": stream["codec_name"], "pixel_format": stream.get("pix_fmt"),
+            return {"duration": duration, "width": width, "height": height, "display_width": display_width,
+                    "codec": stream["codec_name"], "pixel_format": stream.get("pix_fmt"),
                     "has_audio": audio is not None, "audio_codec": audio["codec_name"] if audio else None}
         except (subprocess.TimeoutExpired, ValueError, KeyError) as exc:
             raise MediaError("No se pudo leer la información del vídeo.") from exc
@@ -57,6 +65,11 @@ class MediaService:
                            capture_output=True, timeout=30, creationflags=CREATE_NO_WINDOW)
         except subprocess.TimeoutExpired:
             pass  # La miniatura es opcional; el vídeo sigue siendo editable.
+
+    def source_geometry(self, path: Path, metadata: dict | None = None) -> SourceGeometry:
+        if not metadata or not metadata.get("display_width"):
+            metadata = self.probe(path)
+        return SourceGeometry(width=metadata["width"], height=metadata["height"], display_width=metadata["display_width"])
 
     @staticmethod
     def video_filter(request: ClipRequest) -> str:
@@ -71,8 +84,14 @@ class MediaService:
         return f"{normalize},{fit},setsar=1"
 
     def render_command(self, source: Path, output: Path, request: ClipRequest, *, use_ass: bool = False,
-                       layers: list[tuple[GraphicLayer, Path | str]] | None = None) -> list[str]:
-        if request.fit == "blur":
+                       layers: list[tuple[GraphicLayer, Path | str]] | None = None,
+                       source_geometry: SourceGeometry | None = None) -> list[str]:
+        if request.fit == "split" and request.split_layout:
+            geometry = split_geometry(request.split_layout, request.dimensions(), source_geometry or self.source_geometry(source))
+            if geometry is None:
+                raise MediaError(EMPTY_GAMEPLAY)
+            graph = split_graph(request.split_layout, geometry)
+        elif request.fit == "blur":
             w, h = request.dimensions()
             # Both layers come from the same decoded frame, including rotation and SAR.
             sigma = max(.01, request.blur_strength / 100 * min(w, h) * .055)
@@ -111,7 +130,7 @@ class MediaService:
         if use_ass:
             graph += f";[{current}]ass=overlay.ass[captioned]"
             current = "captioned"
-        if use_ass or layers or request.fit == "blur":
+        if use_ass or layers or request.fit in ("blur", "split"):
             video = ["-filter_complex_threads", "2", "-filter_complex", graph, "-map", f"[{current}]"]
         else:
             video = ["-map", "0:V:0", "-vf", self.video_filter(request)]

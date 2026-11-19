@@ -1,11 +1,19 @@
 export interface Video {
   id: string; name: string; duration: number; width: number; height: number; size: number;
+  display_width?: number;
   codec: string; has_audio: boolean; preview_status: 'ready' | 'processing' | 'failed';
   preview_url: string | null; thumbnail_url: string; created_at: string;
 }
+export interface SourceRect { x: number; y: number; width: number; height: number }
+export interface SourceGeometry { width: number; height: number; display_width: number }
+export interface SplitRegion { rect: SourceRect; zoom: number; pan_x: number; pan_y: number }
+export interface SplitLayout {
+  camera_share: number; inverted: boolean; camera: SplitRegion; gameplay: SplitRegion;
+}
 export interface ClipSettings {
   video_id: string; title: string; start: number; end: number; ratio: string; resolution: number;
-  fit: 'contain' | 'cover' | 'blur'; platform: string; safe_top: number; safe_bottom: number; focus_x: number; focus_y: number;
+  fit: 'contain' | 'cover' | 'blur' | 'split'; platform: string; safe_top: number; safe_bottom: number; focus_x: number; focus_y: number;
+  split_layout?: SplitLayout | null;
   blur_strength?: number;
   captions?: CaptionOptions | null;
   graphics?: GraphicLayer[];
@@ -54,13 +62,15 @@ export interface CaptionStyle {
   preset: 'classic' | 'hormozi' | 'karaoke' | 'minimal';
   font: string; size: number; color: string; active_color: string; outline: number; outline_color: string; shadow: number;
   background: string; background_opacity: number; align: 'left' | 'center' | 'right'; position: number; words_per_line: number;
+  anchor?: 'safe' | 'split';
+  position_x?: number | null;
 }
 export interface CaptionOptions { enabled: boolean; sidecars: boolean; revision: string | null; language: string; style: CaptionStyle }
 export interface GraphicLayer {
   id: string; kind: 'image' | 'text'; name: string; asset_id: string | null; text: string; font: string; color: string;
   x: number; y: number; size: number; opacity: number; start: number; end: number | null;
 }
-export type RenderOptions = Pick<ClipSettings, 'ratio' | 'resolution' | 'fit' | 'platform' | 'safe_top' | 'safe_bottom' | 'focus_x' | 'focus_y' | 'blur_strength' | 'captions' | 'graphics'>;
+export type RenderOptions = Pick<ClipSettings, 'ratio' | 'resolution' | 'fit' | 'platform' | 'safe_top' | 'safe_bottom' | 'focus_x' | 'focus_y' | 'blur_strength' | 'split_layout' | 'captions' | 'graphics'>;
 export interface CampaignTemplate { id: string; name: string; example: boolean; options: RenderOptions }
 
 export async function request<T>(url: string, options?: RequestInit): Promise<T> {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { Image, Layers, Plus, Save } from 'lucide-react';
 import { request, type CampaignTemplate, type GraphicLayer, type RenderOptions } from '../api';
+import { NumericInput } from './NumericInput';
 
 const makeId = () => crypto.randomUUID().replaceAll('-', '');
 
@@ -96,16 +97,18 @@ export function CampaignPanel({ layers, options, onLayers, onApply, onSelect, du
         <div className="phase-toolbar">
           {([['x', 'Horizontal (%)', 0], ['y', 'Vertical (%)', 0], ['size', 'Tamaño', 5], ['opacity', 'Opacidad (%)', 0]] as const)
             .map(([field, label, min]) => <label key={field}>{label}
-              <input type="number" min={min} max={100} step={field === 'x' || field === 'y' ? '.1' : 1} value={layer[field]}
-                onChange={e => change(layer.id, { [field]: Math.max(min, Math.min(100, +e.target.value)) })}/>
+              <NumericInput min={min} max={100} precision={field === 'x' || field === 'y' ? 1 : 0}
+                value={layer[field]} onCommit={value => change(layer.id, { [field]: value })}/>
             </label>)}
         </div>
         <div className="phase-toolbar">
           <label><input type="checkbox" checked={layer.start === 0 && layer.end === null} onChange={e => change(layer.id,
             e.target.checked ? { start: 0, end: null } : { end: Math.max(.1, duration || 3) })}/> Todo el clip</label>
-          <label>Aparece (s)<input type="number" min={0} max={3600} step=".01" value={layer.start} onChange={e => change(layer.id, { start: +e.target.value })}/></label>
-          <label>Desaparece (s)<input type="number" min=".01" max={3600} step=".01" value={layer.end ?? ''} placeholder="Final"
-            onChange={e => change(layer.id, { end: e.target.value ? +e.target.value : null })}/></label>
+          <label>Aparece (s)<NumericInput min={0} max={3600} precision={2} value={layer.start}
+            onCommit={start => change(layer.id, { start })}/></label>
+          <label>Desaparece (s)<NumericInput min={.01} max={3600} precision={2} value={layer.end} placeholder="Final"
+            onCommit={end => change(layer.id, { end })}/></label>
+          {layer.end !== null && <button type="button" className="secondary" onClick={() => change(layer.id, { end: null })}>Hasta el final del clip</button>}
           <button className="secondary" onClick={() => onSelect(layer.id, layer.start)}>Posicionar en el vídeo</button>
           <button className="secondary danger-link" onClick={() => onLayers(items => items.filter(item => item.id !== layer.id))}>Eliminar capa</button>
         </div>

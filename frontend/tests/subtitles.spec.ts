@@ -94,6 +94,7 @@ test('resalta una palabra y ofrece SRT y VTT en una exportación real', async ({
   await expect.poll(() => page.locator('.video-frame video').evaluate((video: HTMLVideoElement) => video.videoHeight)).toBe(854);
   const previous = await page.locator('.video-frame video').getAttribute('src');
   await panel.getByLabel('Posición vertical (%)').fill('45');
+  await panel.getByLabel('Posición vertical (%)').press('Enter');
   await expect(page.locator('.video-frame video')).toHaveCount(0);
   await panel.getByLabel('Texto del segmento 1').fill('Hola Bogotá editado');
   await expect(page.getByText('Guarda los subtítulos para actualizar Vista exacta.')).toBeVisible();

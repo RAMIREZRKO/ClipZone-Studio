@@ -49,7 +49,7 @@ h1 { font-size: clamp(28px, 2.3vw, 32px); }
 .switch > span { height: 16px; width: 16px; }
 .switch.on > span { transform: translateX(18px); }
 .clip-fields input, .safe-inputs input, .select-wrap select, .analysis-controls select,
-.analysis-controls input[type=number], .analysis-history select {
+.analysis-controls [data-numeric-input], .analysis-history select {
   color: var(--text);
   font-size: 14px;
   min-height: 38px;
@@ -63,6 +63,12 @@ h1 { font-size: clamp(28px, 2.3vw, 32px); }
 .video-frame video { position: relative; z-index: 1; }
 .blur-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; }
 .monitor-modes { display: flex; flex-wrap: wrap; padding: 9px 14px; gap: 7px; }
+.transport { min-height: 58px; height: auto; flex-wrap: wrap; gap: 4px 10px; padding-block: 6px; }
+.transport .timecode { margin-left: 0; flex: 1; justify-content: center; white-space: nowrap; }
+.transport-audio { display: flex; align-items: center; gap: 6px; flex: 0 1 156px; min-width: 112px; }
+.transport-audio input { flex: 1; min-width: 0; width: 100%; height: 30px; margin: 0; }
+.transport-audio input:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; border-radius: 5px; }
+.transport-audio output { min-width: 4ch; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--secondary-text); }
 .blur-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; }
 .blur-control input { flex: 1; min-width: 70px; }
 .processing-preview, .processing-preview small { font-size: 13px; line-height: 1.5; }
@@ -233,6 +239,14 @@ h1 { font-size: clamp(28px, 2.3vw, 32px); }
   .clip-fields { flex-wrap: wrap; }
 }
 @media (max-width: 700px) {
+  .transport {
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: 'play time fullscreen' 'audio audio audio'; column-gap: 5px;
+  }
+  .transport-left { grid-area: play; }
+  .transport .timecode { grid-area: time; }
+  .transport-fullscreen { grid-area: fullscreen; }
+  .transport-audio { grid-area: audio; }
   .topbar .breadcrumbs > span, .topbar .breadcrumbs > svg:nth-of-type(2) { display: none; }
   .topbar .breadcrumbs, .server-status { font-size: 11px; }
   .analysis-layout { grid-template-columns: 1fr; }

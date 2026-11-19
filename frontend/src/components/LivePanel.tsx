@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Captions, Clapperboard, Download, HardDrive, LoaderCircle, Radio, RefreshCw, Sparkles } from 'lucide-react';
-import { request, seconds, sizeLabel, type Video } from '../api';
+import { request, seconds, sizeLabel, type RenderOptions, type Video } from '../api';
 import { DirectControls, platformLabel, useDirectLive } from './DirectLive';
+import { AutoClipping } from './AutoClipping';
 
 type CaptureMethod = 'direct' | 'obs';
 type ReplayLength = 30 | 60 | 90 | 120 | 300;
@@ -28,7 +29,7 @@ interface Capture {
   duration: number;
   size: number;
   video: Video | null;
-  method?: CaptureMethod;
+  method?: CaptureMethod | 'auto';
   platform?: string;
   quality?: string;
 }
@@ -58,7 +59,7 @@ function preferredLength(options: readonly ReplayLength[], key: string): ReplayL
 export function LivePanel({ active, onImported, onOpen }: {
   active: boolean;
   onImported: (video: Video) => void;
-  onOpen: (video: Video, destination: LiveDestination) => void;
+  onOpen: (video: Video, destination: LiveDestination, options?: RenderOptions) => void;
 }) {
   const [method, setMethod] = useState<CaptureMethod>(() => preferences('clipzone.live.method') === 'obs' ? 'obs' : 'direct');
   const [obsLength, setObsLength] = useState<ReplayLength>(() => preferredLength(obsLengths, 'clipzone.live.duration'));
@@ -180,6 +181,14 @@ export function LivePanel({ active, onImported, onOpen }: {
     remember('clipzone.live.method', value);
   }
 
+  function onAutoKeep(video: Video) {
+    onImported(video);
+    const revision = ++historyRevision.current;
+    request<Capture[]>('/live/captures').then(items => {
+      if (revision === historyRevision.current) setHistory(items);
+    }).catch(cause => setHistoryError((cause as Error).message));
+  }
+
   const connection = status?.connected ? 'OBS conectado' : checking && !status ? 'Buscando OBS…' : 'OBS sin conexión';
   const librarySize = history.reduce((sum, item) => sum + (item.video ? item.size : 0), 0);
   return <div className="live-workspace">
@@ -242,6 +251,7 @@ export function LivePanel({ active, onImported, onOpen }: {
         <div><dt>Capturas en la biblioteca</dt><dd>{sizeLabel(librarySize)}</dd></div>
       </dl>
     </section>
+    <AutoClipping active={active} directMethod={method === 'direct'} onKeep={onAutoKeep} onEdit={(video, options) => onOpen(video, 'editor', options)}/>
     <section className="panel live-history" aria-labelledby="live-history-heading">
       <div className="panel-heading"><div><Clapperboard size={18}/><h2 id="live-history-heading">Historial de capturas</h2></div></div>
       <div className="live-body">
@@ -251,7 +261,7 @@ export function LivePanel({ active, onImported, onOpen }: {
           {history.map(item => <li key={item.id}>
             <div className="live-capture-info">
               <h3>{item.name}</h3>
-              <p><time dateTime={item.captured_at}>{dateLabel.format(new Date(item.captured_at))}</time> · {seconds(item.duration)} · {sizeLabel(item.size)} · {item.method === 'direct' ? [platformLabel(item.platform), item.quality].filter(Boolean).join(' · ') : 'OBS Studio'}</p>
+              <p><time dateTime={item.captured_at}>{dateLabel.format(new Date(item.captured_at))}</time> · {seconds(item.duration)} · {sizeLabel(item.size)} · {item.method === 'auto' ? 'AutoClipping IA' : item.method === 'direct' ? [platformLabel(item.platform), item.quality].filter(Boolean).join(' · ') : 'OBS Studio'}</p>
               {item.duration + 0.15 < item.requested_seconds &&
                 <p>Se guardaron {Math.round(item.duration * 10) / 10} s de los {item.requested_seconds} s solicitados.</p>}
             </div>

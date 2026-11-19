@@ -1,0 +1,29 @@
+.split-controls { display: grid; gap: 12px; margin-top: 14px; }
+.split-controls label { display: grid; gap: 5px; color: var(--secondary-text); font-size: 13px; min-width: 0; }
+.split-controls input:not([type=checkbox]), .split-controls select { width: 100%; min-height: 36px; }
+.split-controls .split-invert { display: flex; align-items: center; gap: 7px; cursor: pointer; min-height: 36px; }
+.split-invert input { accent-color: var(--green); width: 17px; height: 17px; }
+.split-fields, .split-region-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.split-controls summary { padding: 8px 0; cursor: pointer; color: var(--green); }
+.video-frame .split-source-video { position: absolute; inset: 0; opacity: 0; }
+.split-canvas, .split-region-plane { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.split-canvas { z-index: 2; }
+.split-region-plane { z-index: 5; }
+.split-source-rect { position: absolute; border: 2px dashed var(--region-color); }
+.split-source-rect[data-region=camera] { --region-color: #b1f65a; }
+.split-source-rect[data-region=gameplay] { --region-color: #80ddfa; }
+.split-source-rect[data-selected=true] { border-style: solid; box-shadow: 0 0 0 1px #101510; }
+.split-rect-drag, .split-rect-label, .split-handle { pointer-events: auto; touch-action: none; }
+.split-rect-drag { position: absolute; inset: 0; cursor: move; z-index: 1; }
+.split-rect-label {
+  position: absolute; z-index: 2; top: 5px; left: 6px; color: var(--region-color); background: #101610;
+  padding: 4px 7px; min-height: 26px; border: 1px solid var(--region-color); border-radius: 4px; font-size: 12px;
+  cursor: move;
+}
+.split-handle { position: absolute; z-index: 3; width: 20px; height: 20px; display: grid; place-items: center; }
+.split-handle::before { content: ''; width: 10px; height: 10px; border-radius: 2px; background: var(--region-color); outline: 1px solid #101510; }
+.split-handle.nw { top: -4px; left: -4px; cursor: nwse-resize; }
+.split-handle.ne { top: -4px; right: -4px; cursor: nesw-resize; }
+.split-handle.sw { bottom: -4px; left: -4px; cursor: nesw-resize; }
+.split-handle.se { bottom: -4px; right: -4px; cursor: nwse-resize; }
+.live-auto .split-template-choice { display: grid; max-width: 24rem; gap: 5px; }
