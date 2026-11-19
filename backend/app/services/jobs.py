@@ -22,19 +22,27 @@ class JobQueue:
             if job["status"] in ("queued", "running"):
                 job.update(status="failed", error="El proceso anterior se interrumpió. Vuelve a exportar.", updated_at=now())
                 db.put("jobs", job)
-                Path(job["output_path"]).unlink(missing_ok=True)
+                try:
+                    Path(job["output_path"]).unlink(missing_ok=True)
+                except OSError:
+                    # El historial queda visible para reintentar el borrado.
+                    pass
                 if job["kind"] == "preview":
                     video = db.get("videos", job["video_id"])
                     if video:
                         video["preview_status"] = "failed"
                         db.put("videos", video)
 
-    def submit(self, *, kind: str, video_id: str, command: list[str], output: Path, duration: float, title: str, settings: dict | None = None) -> dict:
+    def submit(self, *, kind: str, video_id: str, command: list[str], output: Path, duration: float,
+               title: str, settings: dict | None = None, auxiliary: dict[str, str] | None = None,
+               sidecar_cues: list[dict] | None = None) -> dict:
         job = {"id": uuid.uuid4().hex, "kind": kind, "video_id": video_id, "title": title,
                "status": "queued", "progress": 0, "error": None, "created_at": now(), "updated_at": now(),
                "output_path": str(output), "settings": settings, "size": None}
+        if sidecar_cues:
+            job["sidecar_cues"] = sidecar_cues
         self.db.put("jobs", job)
-        self.executor.submit(self._run, job["id"], command, output, duration)
+        self.executor.submit(self._run, job["id"], command, output, duration, auxiliary)
         return job
 
     def _update(self, identifier: str, **changes):
@@ -43,18 +51,24 @@ class JobQueue:
         self.db.put("jobs", job)
         return job
 
-    def _run(self, identifier: str, command: list[str], output: Path, duration: float):
+    def _run(self, identifier: str, command: list[str], output: Path, duration: float, auxiliary: dict[str, str] | None):
         error = None
+        workspace = None
         try:
             with self.lock:
                 job = self.db.get("jobs", identifier)
-                if job["status"] == "cancelled" or self.closed:
+                if not job or job["status"] == "cancelled" or self.closed:
                     return
                 self._update(identifier, status="running")
+                if auxiliary:
+                    workspace = tempfile.TemporaryDirectory(prefix="clipzone-render-")
+                    for name, contents in auxiliary.items():
+                        (Path(workspace.name) / name).write_text(contents, encoding="utf-8")
                 stderr_file = tempfile.TemporaryFile(mode="w+b")
                 try:
                     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr_file,
-                                               text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
+                                               text=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+                                               cwd=workspace.name if workspace else None)
                 except Exception:
                     stderr_file.close()
                     raise
@@ -80,20 +94,31 @@ class JobQueue:
         except Exception as exc:
             error = str(exc)
         finally:
+            if workspace:
+                try:
+                    workspace.cleanup()
+                except OSError:
+                    # Windows may briefly hold a handle to an ASS file after termination.
+                    pass
             with self.lock:
                 self.processes.pop(identifier, None)
                 job = self.db.get("jobs", identifier)
+                if not job:
+                    return
                 if job["status"] == "cancelled":
                     output.unlink(missing_ok=True)
                 elif error:
                     self._update(identifier, status="failed", error=error)
                     output.unlink(missing_ok=True)
-                else:
+                elif output.is_file():
                     self._update(identifier, status="completed", progress=100, size=output.stat().st_size)
+                else:
+                    self._update(identifier, status="failed", error="El render no produjo un archivo disponible.")
                 if job["kind"] == "preview":
                     video = self.db.get("videos", job["video_id"])
-                    video["preview_status"] = "ready" if self.db.get("jobs", identifier)["status"] == "completed" else "failed"
-                    self.db.put("videos", video)
+                    if video:
+                        video["preview_status"] = "ready" if self.db.get("jobs", identifier)["status"] == "completed" else "failed"
+                        self.db.put("videos", video)
 
     def cancel(self, identifier: str):
         with self.lock:

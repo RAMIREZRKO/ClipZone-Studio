@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from uuid import uuid4
 
 from ..ai.contracts import Word
@@ -45,6 +46,8 @@ class AnalysisQueue:
     def _update(self, identifier: str, **changes):
         with self.lock:
             item = self.db.get("analyses", identifier)
+            if not item or item["status"] == "cancelled":
+                raise AnalysisCancelled()
             item.update(changes, updated_at=now())
             return self.db.put("analyses", item)
 
@@ -63,15 +66,18 @@ class AnalysisQueue:
             return item
 
     def _check(self, identifier: str):
-        if self.closed or self.db.get("analyses", identifier)["status"] == "cancelled":
+        item = self.db.get("analyses", identifier)
+        if self.closed or not item or item["status"] == "cancelled":
             raise AnalysisCancelled()
 
     def _worker_command(self, audio: Path, model: Path, language: str, result: Path) -> list[str]:
         return [sys.executable, "-m", "app.ai.worker", "--audio", str(audio), "--model", str(model),
                 "--language", language, "--output", str(result)]
 
-    def _process(self, identifier: str, command: list[str], *, whisper: bool, duration: float):
+    def _process(self, identifier: str, command: list[str], *, whisper: bool, duration: float, cpu_threads: int = 4):
         env = {**os.environ, "PYTHONPATH": str(ROOT / "backend"), "PYTHONUTF8": "1"}
+        if whisper:
+            env.update(CLIPZONE_WHISPER_THREADS=str(cpu_threads), OMP_NUM_THREADS=str(cpu_threads))
         with tempfile.TemporaryFile(mode="w+b") as errors:
             with self.lock:
                 self._check(identifier)
@@ -110,12 +116,14 @@ class AnalysisQueue:
 
     def _run(self, identifier: str, video: dict, options: AnalysisRequest):
         audio, output = self._paths(identifier)
+        started = time.monotonic()
         try:
             with self.lock:
                 self._check(identifier)
                 self._update(identifier, status="running", stage="Preparando audio")
             cached = next((a for a in self.db.list("analyses") if a["video_id"] == video["id"] and a["status"] == "completed"
-                           and a["options"]["model"] == options.model and a["options"]["language"] == options.language and a.get("result")), None)
+                           and a.get("options", {}).get("model") == options.model
+                           and a.get("options", {}).get("language") == options.language and a.get("result")), None)
             if options.reuse_transcript and cached:
                 transcript = cached["result"]["transcript"]
                 self._update(identifier, progress=92, stage="Reutilizando transcripción", reused_transcript=True)
@@ -128,7 +136,7 @@ class AnalysisQueue:
                            "-f", "s16le", "-progress", "pipe:1", "-nostats", str(audio)]
                 self._process(identifier, command, whisper=False, duration=video["duration"])
                 self._process(identifier, self._worker_command(audio, self.settings.model_dir / f"{options.model}.pt", options.language, output),
-                              whisper=True, duration=video["duration"])
+                              whisper=True, duration=video["duration"], cpu_threads=options.cpu_threads)
                 transcript = json.loads(output.read_text(encoding="utf-8"))
             self._check(identifier)
             self._update(identifier, progress=95, stage="Detectando y puntuando momentos")
@@ -138,12 +146,14 @@ class AnalysisQueue:
             with self.lock:
                 self._check(identifier)
                 self._update(identifier, status="completed", progress=100, stage="Análisis listo",
+                             elapsed_seconds=round(time.monotonic() - started, 2),
                              result={"transcript": transcript, "moments": moments, "scoring_version": "local-v1"})
         except AnalysisCancelled:
             pass
         except Exception as exc:
             with self.lock:
-                if self.db.get("analyses", identifier)["status"] != "cancelled":
+                item = self.db.get("analyses", identifier)
+                if item and item["status"] != "cancelled":
                     self._update(identifier, status="failed", stage="No se pudo analizar", error=str(exc)[-2000:])
         finally:
             self._cleanup(identifier)

@@ -1,5 +1,6 @@
 # Dependencias y entornos locales (conservar los lockfiles en Git)
 .venv/
+.venv-argos/
 venv/
 env/
 ENV/

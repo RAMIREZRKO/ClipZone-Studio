@@ -143,3 +143,9 @@ def test_nonfinite_and_long_durations_rejected():
         ClipRequest(video_id="a" * 32, start=float("nan"), end=10)
     with pytest.raises(ValidationError):
         ClipRequest(video_id="a" * 32, start=0, end=3601)
+
+
+def test_clip_duration_of_exactly_ten_centiseconds_is_accepted():
+    ClipRequest(video_id="a" * 32, start=1.11, end=1.21)
+    with pytest.raises(ValidationError, match="al menos 0,1 segundos"):
+        ClipRequest(video_id="a" * 32, start=1.11, end=1.20)

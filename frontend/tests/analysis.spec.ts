@@ -1,6 +1,41 @@
 import { test, expect } from '@playwright/test';
 import path from 'node:path';
 
+test('instala modelos solo al pulsar y permite cancelar una descarga', async ({ page }) => {
+  let state = 'idle';
+  let starts = 0;
+  await page.route('**/api/ai/capabilities', route => route.fulfill({ json: {
+    dependencies: { whisper: true, torch: true, numpy: true }, ready: true, device: 'cpu',
+    models: [
+      { id: 'tiny', label: 'Tiny · rápido', size_mb: 76, installed: true },
+      { id: 'base', label: 'Base · equilibrado', size_mb: 145, installed: false },
+      { id: 'small', label: 'Small · mayor precisión', size_mb: 484, installed: false },
+    ],
+    downloads: state === 'idle' ? {} : { base: { status: state, total: 1000, received: 350, error: null } },
+  } }));
+  await page.route('**/api/ai/models/base/download', route => {
+    starts++;
+    state = 'downloading';
+    return route.fulfill({ status: 202, json: {} });
+  });
+  await page.route('**/api/ai/models/base/cancel', route => {
+    state = 'cancelled';
+    return route.fulfill({ json: {} });
+  });
+  await page.goto('/');
+  await expect(page.getByLabel('Modelo Whisper')).toHaveValue('base');
+  await expect(page.getByLabel('Hilos de Whisper')).toHaveValue('4');
+  const install = page.getByRole('button', { name: /Instalar Base/ });
+  await expect(install).toBeVisible();
+  expect(starts).toBe(0);
+  await install.click();
+  await expect(page.getByLabel('Progreso de descarga del modelo')).toHaveAttribute('value', '35');
+  expect(starts).toBe(1);
+  await page.getByRole('button', { name: 'Cancelar descarga', exact: true }).click();
+  await expect(page.getByText('Descarga cancelada.', { exact: true })).toBeVisible();
+  await expect(install).toBeEnabled();
+});
+
 test('Whisper real, puntuación, selección múltiple y Facebook Reels', async ({ page }) => {
   test.skip(process.env.CLIPZONE_REAL_AI_E2E !== '1', 'Activar CLIPZONE_REAL_AI_E2E=1 con Tiny y la demo hablada instalados.');
   test.setTimeout(180_000);
@@ -13,13 +48,16 @@ test('Whisper real, puntuación, selección múltiple y Facebook Reels', async (
   await page.getByRole('button', { name: 'f Facebook Reels', exact: true }).click();
   await page.getByLabel('Resolución', { exact: true }).selectOption('480');
   await page.getByRole('button', { name: /Momentos con IA/ }).click();
-  await page.getByLabel('Idioma del audio').selectOption('en');
+  await expect(page.getByLabel('Modelo Whisper')).toHaveValue('base');
+  await page.getByLabel('Modelo Whisper').selectOption('tiny');
+  await expect(page.getByLabel('Idioma del audio')).toHaveValue('auto');
   await page.getByLabel('Duración mínima IA').fill('3');
   await page.getByLabel('Duración máxima IA').fill('12');
   await page.getByLabel('Máximo de propuestas').fill('5');
   await expect(page.getByRole('button', { name: 'Analizar vídeo', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Analizar vídeo', exact: true }).click();
   await expect.poll(() => page.locator('.moment-card').count(), { timeout: 120_000 }).toBeGreaterThanOrEqual(2);
+  await expect(page.getByText('Idioma detectado del audio: EN.')).toBeVisible();
   const cards = page.locator('.moment-card');
   const scores = await page.locator('.moment-score strong').allTextContents();
   expect(scores.every(value => +value >= 0 && +value <= 100)).toBe(true);
@@ -33,10 +71,10 @@ test('Whisper real, puntuación, selección múltiple y Facebook Reels', async (
   await cards.first().getByRole('button', { name: 'Revisar en editor', exact: true }).click();
   await expect(page.getByLabel('Nombre del clip', { exact: true })).toHaveValue(firstTitle!);
   await page.locator('#ai-moments').scrollIntoViewIfNeeded();
-  await page.locator('#ai-moments').screenshot({ path: '../docs/capturas/momentos-ia.png' });
+  await page.locator('#ai-moments').screenshot({ path: '../test-results/screenshots/momentos-ia.png' });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.locator('#ai-moments').screenshot({ path: '../docs/capturas/momentos-ia-movil.png' });
+  await page.locator('#ai-moments').screenshot({ path: '../test-results/screenshots/momentos-ia-movil.png' });
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.getByRole('button', { name: 'Generar seleccionados', exact: true }).click();
   const exports = page.locator('.export-card').filter({ hasText: 'Facebook Reels' });

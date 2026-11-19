@@ -1,7 +1,9 @@
-"""API de análisis y generación múltiple; ningún endpoint descarga modelos."""
+"""Análisis, generación múltiple e instalación explícita de modelos locales."""
 from pathlib import Path
+from typing import Literal
 from fastapi import APIRouter, HTTPException
 from .models import capabilities
+from ..campaigns import asset_file
 from ..models import AnalysisRequest, BatchRequest, ClipRequest
 
 
@@ -20,7 +22,19 @@ def register_ai(app, settings, find_video, enqueue_clip, public_job):
 
     @router.get("/ai/capabilities")
     def available():
-        return capabilities(settings)
+        return {**capabilities(settings), "downloads": app.state.model_downloads.statuses(), "device": "cpu"}
+
+    @router.post("/ai/models/{model}/download", status_code=202)
+    def download(model: Literal["tiny", "base", "small"]):
+        try:
+            return app.state.model_downloads.start(model)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @router.post("/ai/models/{model}/cancel")
+    def cancel_download(model: Literal["tiny", "base", "small"]):
+        app.state.model_downloads.cancel(model)
+        return app.state.model_downloads.statuses().get(model)
 
     @router.get("/videos/{identifier}/analyses")
     def analyses(identifier: str):
@@ -39,10 +53,17 @@ def register_ai(app, settings, find_video, enqueue_clip, public_job):
         available = capabilities(settings)
         if not all(available["dependencies"].values()):
             raise HTTPException(503, "Instala Whisper local con scripts/setup-ai.ps1 antes de analizar.")
-        if not any(m["id"] == body.model and m["installed"] for m in available["models"]):
-            raise HTTPException(409, f"El modelo {body.model} no está instalado. Ejecuta scripts/setup-ai.ps1 -Model {body.model}.")
+        model = next(m for m in available["models"] if m["id"] == body.model)
+        if not model["installed"]:
+            issue = model.get("integrity")
+            if issue == "invalid":
+                raise HTTPException(409, f"El modelo {body.model} tiene un SHA‑256 inválido. Vuelve a instalarlo en Momentos con IA.")
+            if issue == "unreadable":
+                raise HTTPException(409, f"El modelo {body.model} está bloqueado o no se puede leer.")
+            raise HTTPException(409, f"El modelo {body.model} no está instalado. Instálalo en Momentos con IA.")
         try:
-            return summary(app.state.analysis_queue.submit(video, body))
+            with app.state.export_lock:
+                return summary(app.state.analysis_queue.submit(find_video(identifier), body))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
@@ -59,8 +80,9 @@ def register_ai(app, settings, find_video, enqueue_clip, public_job):
 
     @router.post("/analyses/{identifier}/cancel")
     def cancel_analysis(identifier: str):
-        find_analysis(identifier)
-        return summary(app.state.analysis_queue.cancel(identifier))
+        with app.state.export_lock:
+            find_analysis(identifier)
+            return summary(app.state.analysis_queue.cancel(identifier))
 
     @router.post("/clips/batch", status_code=202)
     def batch(body: BatchRequest):
@@ -84,6 +106,9 @@ def register_ai(app, settings, find_video, enqueue_clip, public_job):
                 raise HTTPException(429, "La selección supera los 20 trabajos pendientes. Reduce el lote o espera.")
             # Valida el ejecutable antes de encolar cualquier archivo del lote.
             app.state.media.require("ffmpeg")
+            for layer in body.graphics:
+                if layer.kind == "image" and layer.asset_id:
+                    asset_file(app.state.db, settings, layer.asset_id)
             jobs = [enqueue_clip(c, {"analysis_id": analysis["id"], "moment_id": i, "score": lookup[i]["score"]})
                     for c, i in zip(clips, body.moment_ids)]
         return {"jobs": jobs, "count": len(jobs)}

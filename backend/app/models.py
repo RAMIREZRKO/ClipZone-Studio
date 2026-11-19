@@ -1,6 +1,8 @@
+from decimal import Decimal
 from enum import Enum
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal
+from .composition import CaptionOptions, GraphicLayer
 
 
 class Ratio(str, Enum):
@@ -13,17 +15,22 @@ class Ratio(str, Enum):
 class RenderOptions(BaseModel):
     ratio: Ratio = Ratio.portrait
     resolution: int = Field(default=1080)
-    fit: str = Field(default="contain", pattern="^(contain|cover)$")
+    fit: Literal["contain", "cover", "blur"] = "contain"
+    blur_strength: int = Field(default=55, ge=0, le=100)
     platform: str = Field(default="tiktok", pattern="^(tiktok|reels|shorts|facebook|custom)$")
     safe_top: int = Field(default=10, ge=0, le=35)
     safe_bottom: int = Field(default=22, ge=0, le=40)
     focus_x: int = Field(default=50, ge=0, le=100)
     focus_y: int = Field(default=50, ge=0, le=100)
+    captions: CaptionOptions | None = None
+    graphics: list[GraphicLayer] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def check_resolution(self):
         if self.resolution not in (480, 720, 1080):
             raise ValueError("La resolución debe ser 480, 720 o 1080.")
+        if len({layer.id for layer in self.graphics}) != len(self.graphics):
+            raise ValueError("Hay capas gráficas repetidas.")
         return self
 
     def dimensions(self) -> tuple[int, int]:
@@ -41,20 +48,22 @@ class ClipRequest(RenderOptions):
 
     @model_validator(mode="after")
     def check_clip(self):
-        if self.end - self.start < 0.1:
+        duration = Decimal(str(self.end)) - Decimal(str(self.start))
+        if duration < Decimal("0.1"):
             raise ValueError("El clip debe durar al menos 0,1 segundos.")
-        if self.end - self.start > 3600:
+        if duration > 3600:
             raise ValueError("Cada clip puede durar como máximo una hora.")
         return self
 
 
 class AnalysisRequest(BaseModel):
     model: Literal["tiny", "base", "small"] = "tiny"
-    language: str = Field(default="es", pattern="^(auto|es|en|pt|fr|de|it|ja|zh|ru|ar|hi|ko|nl|pl|tr|uk)$")
+    language: str = Field(default="auto", pattern="^(auto|es|en|pt|fr|de|it|ja|zh|ru|ar|hi|ko|nl|pl|tr|uk)$")
     min_duration: float = Field(default=15, ge=1, le=180, allow_inf_nan=False)
     max_duration: float = Field(default=45, ge=1, le=180, allow_inf_nan=False)
     max_clips: int = Field(default=8, ge=1, le=20)
     reuse_transcript: bool = True
+    cpu_threads: Literal[2, 4, 6] = 4
 
     @model_validator(mode="after")
     def check_interval(self):

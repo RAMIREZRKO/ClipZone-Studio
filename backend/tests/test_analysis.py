@@ -33,6 +33,23 @@ def wait(client, path, timeout=40):
     pytest.fail(f'Trabajo sin terminar: {path}')
 
 
+def test_reuse_is_bound_to_source_language_mode_and_model(client, sample_video, fake_engine, monkeypatch):
+    monkeypatch.setattr('app.ai.routes.capabilities', lambda _: {
+        "dependencies": {"whisper": True}, "models": [{"id": name, "installed": True} for name in ("tiny", "base")],
+    })
+    path = f"/api/videos/{upload(client, sample_video)['id']}/analyses"
+    config = {"min_duration": 1, "max_duration": 1.4, "reuse_transcript": True}
+    for model, language, expected in [
+        ("tiny", "es", False), ("tiny", "auto", False),
+        ("base", "auto", False), ("tiny", "auto", True),
+    ]:
+        response = client.post(path, json={**config, "model": model, "language": language})
+        assert response.status_code == 202, response.text
+        result = wait(client, f"/api/analyses/{response.json()['id']}")
+        assert result["status"] == "completed", result
+        assert result["reused_transcript"] is expected
+
+
 @pytest.fixture
 def fake_engine(monkeypatch, settings):
     # Solo se sustituye la inferencia: extracción, cola, persistencia y render son reales.

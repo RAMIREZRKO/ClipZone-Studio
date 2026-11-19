@@ -1,45 +1,44 @@
-"""Descarga explícita de un modelo oficial de Whisper con verificación SHA256."""
+"""Instala explícitamente un modelo oficial utilizando el mismo verificador que la interfaz."""
 import argparse
-import hashlib
 from pathlib import Path
 import sys
-from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+from app.ai.model_files import (
+    MODEL_HASHES, DownloadError, close_diagnostic_logger, create_diagnostic_logger, download_model, inspect_model,
+)
 from app.config import Settings
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["tiny", "base", "small"], default="tiny")
+    parser.add_argument("--model", choices=MODEL_HASHES, default="base")
+    parser.add_argument("--verify", action="store_true", help="Verifica todos los modelos locales sin descargarlos.")
     args = parser.parse_args()
-    import whisper
-    url = whisper._MODELS[args.model]
-    expected = url.split("/")[-2]
-    folder = Settings().model_dir
-    folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{args.model}.pt"
-    if target.is_file():
-        with target.open("rb") as existing:
-            valid = hashlib.file_digest(existing, "sha256").hexdigest() == expected
-        if valid:
-            print(f"Modelo verificado: {target}")
-            return
-    partial = target.with_suffix(".pt.part")
-    checksum = hashlib.sha256()
-    print(f"Descargando {args.model} desde el repositorio oficial de Whisper...", flush=True)
+    settings = Settings()
+    if args.verify:
+        failed = False
+        print(f"Carpeta de modelos: {settings.model_dir.resolve()}")
+        for model in MODEL_HASHES:
+            status, digest = inspect_model(model, settings.model_dir)
+            label = {"verified": "verificado", "invalid": "SHA-256 inválido", "unreadable": "no se puede leer", "missing": "ausente"}[status]
+            print(f"{model}: {label}" + (f" | SHA-256 {digest}" if digest else ""))
+            failed |= status in {"invalid", "unreadable"}
+        if failed:
+            raise SystemExit(1)
+        return
+    log_file = settings.data_dir / "whisper-downloads.log"
+    diagnostics = create_diagnostic_logger(log_file)
+    print(f"Comprobando o descargando el modelo {args.model}...", flush=True)
     try:
-        with urlopen(url, timeout=60) as response, partial.open("wb") as output:
-            while block := response.read(1024 * 1024):
-                output.write(block)
-                checksum.update(block)
-        if checksum.hexdigest() != expected:
-            raise RuntimeError("La comprobación SHA256 del modelo no coincide. Repite la descarga.")
-        partial.replace(target)
-        print(f"Modelo verificado y guardado: {target}")
+        target = download_model(args.model, settings.model_dir, diagnostics=diagnostics)
+    except DownloadError as exc:
+        diagnostics.error("Fallo model=%s code=%s", args.model, exc.code, exc_info=True)
+        raise SystemExit(f"{exc} Registro: {log_file}") from None
     finally:
-        partial.unlink(missing_ok=True)
+        close_diagnostic_logger(diagnostics)
+    print(f"Modelo verificado: {target}")
 
 
 if __name__ == "__main__":

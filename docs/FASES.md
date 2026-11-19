@@ -28,14 +28,15 @@ Verificado con inferencia real de Whisper Tiny en CPU: la muestra hablada produj
 
 Mejoras posteriores opcionales: segmentación de habla más avanzada, un modelo semántico local y medición de calidad en más idiomas y estilos de vídeo.
 
-## Fase 3 — Subtítulos dinámicos (pendiente)
+## Fase 3 — Subtítulos dinámicos, traducción y campañas
 
-- Editor de transcripción y agrupación de frases.
-- Estilos ASS con resaltado por palabra, tamaño, contraste y márgenes seguros.
-- Quemado de subtítulos en FFmpeg y exportación opcional de SRT.
-- Fuentes locales con licencia adecuada y vista previa del render.
-
-Criterio de aceptación: texto sincronizado en clips que no empiezan en cero, acentos correctos, saltos de línea legibles y márgenes respetados en los cuatro formatos. Probar que cambiar el texto no introduce instrucciones en los filtros.
+- Detección automática del idioma del audio por defecto, con selección manual e historial compatible.
+- Pistas editables a partir de palabras y tiempos de Whisper, con edición, división, combinación, borrado y sustitución de texto.
+- Clásico, Hormozi, Karaoke y Minimalista, con estilos configurables y zonas seguras.
+- Traducciones por idioma con importación SRT/VTT, edición y un adaptador para Argos local cuando el par está instalado.
+- Capas PNG y texto, arrastre, escalado, opacidad y visibilidad por intervalo del clip.
+- Plantillas guardadas y ejemplos de YouTube y Kick con espacios para los logos del usuario.
+- FFmpeg compartido entre vista exacta y MP4, SRT/VTT opcionales y aplicación de plantillas a generación múltiple.
 
 ## Fase 4 — Reencuadre inteligente y flujo ampliado (pendiente)
 

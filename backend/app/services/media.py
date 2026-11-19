@@ -3,6 +3,7 @@ import subprocess
 from pathlib import Path
 
 from ..config import Settings
+from ..composition import GraphicLayer
 from ..models import ClipRequest
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -69,10 +70,57 @@ class MediaService:
             fit = f"scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black"
         return f"{normalize},{fit},setsar=1"
 
-    def render_command(self, source: Path, output: Path, request: ClipRequest) -> list[str]:
+    def render_command(self, source: Path, output: Path, request: ClipRequest, *, use_ass: bool = False,
+                       layers: list[tuple[GraphicLayer, Path | str]] | None = None) -> list[str]:
+        if request.fit == "blur":
+            w, h = request.dimensions()
+            # Both layers come from the same decoded frame, including rotation and SAR.
+            sigma = max(.01, request.blur_strength / 100 * min(w, h) * .055)
+            scale = f"scale={w}:{h}:force_divisible_by=2:force_original_aspect_ratio"
+            graph = (
+                "[0:V:0]scale=trunc(iw*sar/2)*2:ih,setsar=1,split[background][foreground];"
+                f"[background]{scale}=increase,crop={w}:{h},gblur=sigma={sigma:.4f}:steps=2[blur];"
+                f"[foreground]{scale}=decrease[fit];"
+                "[blur][fit]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1[video]"
+            )
+        else:
+            graph = f"[0:V:0]{self.video_filter(request)}[video]"
+        inputs = []
+        current = "video"
+        image_index = 0
+        width, height = request.dimensions()
+        for index, (layer, asset) in enumerate(layers or []):
+            label = f"layer{index}"
+            if layer.kind == "text":
+                graph += f";[{current}]ass={asset}[{label}]"
+            else:
+                image_index += 1
+                inputs += ["-protocol_whitelist", "file,pipe", "-f", "image2", "-pattern_type", "none", "-i", str(asset)]
+                w = max(2, round(width * layer.size / 200) * 2)
+                h = max(2, round(height * .4) * 2)
+                x = f"W*{layer.x / 100:.6f}-w/2"
+                y = f"H*{layer.y / 100:.6f}-h/2"
+                end = min(layer.end or (request.end - request.start), request.end - request.start)
+                enable = f"gte(t,{layer.start:.6f})*lt(t,{end:.6f})"
+                graph += (
+                    f";[{image_index}:v:0]format=rgba,scale={w}:{h}:force_original_aspect_ratio=decrease:"
+                    f"force_divisible_by=2,colorchannelmixer=aa={layer.opacity / 100:.3f},format=yuva420p[logo{index}];"
+                    f"[{current}][logo{index}]overlay=x='{x}':y='{y}':eof_action=repeat:enable='{enable}'[{label}]"
+                )
+            current = label
+        if use_ass:
+            graph += f";[{current}]ass=overlay.ass[captioned]"
+            current = "captioned"
+        if use_ass or layers or request.fit == "blur":
+            video = ["-filter_complex_threads", "2", "-filter_complex", graph, "-map", f"[{current}]"]
+        else:
+            video = ["-map", "0:V:0", "-vf", self.video_filter(request)]
+        if use_ass or layers:
+            source, output = source.resolve(), output.resolve()
         return [self.require("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                "-protocol_whitelist", "file,pipe", "-ss", str(request.start), "-i", str(source), "-t", str(request.end - request.start),
-                "-map", "0:v:0", "-map", "0:a:0?", "-vf", self.video_filter(request),
+                "-protocol_whitelist", "file,pipe", "-ss", str(request.start), "-i", str(source), *inputs,
+                "-t", str(request.end - request.start),
+                *video, "-map", "0:a:0?",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-map_metadata", "-1",
                 "-progress", "pipe:1", "-nostats", str(output)]

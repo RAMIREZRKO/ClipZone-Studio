@@ -1,5 +1,22 @@
 # Validación de ClipZone Studio
 
+## Versión 0.3.0
+
+- **86 pruebas de backend y 11 pruebas de navegador en Edge aprobadas.** React y TypeScript compilados.
+- Se probó detección automática real de inglés con Whisper, persistencia y descarte de transcripciones incompatibles. Tiny, Base y Small conservaron sus SHA‑256 oficiales.
+- Se comprobaron clips con inicio distinto de cero, límites de segmentos, resaltado por palabra, texto incrustado, audio y SRT/VTT en los cuatro formatos. Los MP4 de Vista exacta coincidieron con los exportados.
+- Dos PNG transparentes y dos textos se probaron juntos con tiempos y opacidad. Una plantilla se aplicó a dos clips de un lote. Edge verificó el arrastre, guardado y reaplicación.
+- Se probaron edición e importación de traducciones, preservación de la transcripción y una base SQLite anterior. El motor opcional Argos se comprobó en la integración con una respuesta de prueba. Este equipo conserva la edición e importación sin paquetes Argos instalados.
+
+## Versión 0.2.1
+
+- **Backend.** Se probaron los tres encuadres en las cuatro relaciones de aspecto. Los doce MP4 de la vista exacta coincidieron byte por byte con sus exportaciones. FFprobe verificó las dimensiones y la pista de audio.
+- **Almacenamiento.** Se probaron los cuatro presets, eliminación múltiple con y sin archivos, conservación del original externo y de los clips derivados, archivos ausentes, bloqueo real de Windows, restauración y recuperación del diario de SQLite. La limpieza preservó las transcripciones.
+- **Whisper.** Se ejecutó una transcripción real con Tiny y generación automática. Las pruebas de descarga usaron datos de prueba para comprobar el botón de inicio, progreso, cancelación, verificación SHA256 y reutilización del archivo instalado. Se ejecutó también la comprobación SHA256 contra el Tiny oficial ya instalado. Base y Small se ofrecen bajo demanda.
+- **Interfaz.** Se revisó el editor a 1366 px y se comprobaron 1280, 1366, 1920 y 390 px en Edge. Se verificó el umbral de 4,5:1 en la etiqueta de configuración medida. Esto cubre una muestra del contraste.
+
+Los borrados se ejecutaron únicamente contra un directorio de prueba. Las capturas de esta versión quedan en `test-results/screenshots`.
+
 ## Versión 0.2 — fases 1 y 2
 
 Resultado final: **45 pruebas Python aprobadas, sin omisiones, y 4 pruebas de navegador aprobadas**. La compilación TypeScript/Vite, `pip check`, el diagnóstico de dependencias y la sintaxis de los cinco scripts PowerShell también son correctos.

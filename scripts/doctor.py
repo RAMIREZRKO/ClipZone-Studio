@@ -1,7 +1,7 @@
 """Diagnóstico sin modificar el equipo. Ejecutar con .venv/Scripts/python.exe."""
 import importlib.util
-import shutil
 import subprocess
+import re
 import sys
 from pathlib import Path
 
@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from app.config import Settings
 from app.ai.models import capabilities
+from app.translation import argos_python
 
 
 def main() -> int:
@@ -31,6 +32,10 @@ def main() -> int:
                 supported = "libx264" in encoders and " aac " in encoders
                 print(f"[{'OK' if supported else 'FALTA'}] Codificadores libx264 y AAC")
                 okay &= supported
+                filters = subprocess.run([binary, "-hide_banner", "-filters"], capture_output=True, text=True,
+                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+                ass_available = bool(re.search(r"\bass\s+V->V", filters))
+                print(f"[{'OK' if ass_available else 'FALTA'}] libass para subtitulos incrustados")
         else:
             print(f"[FALTA] {name}. Agregalo al PATH o ejecuta scripts/setup.ps1 -DownloadFFmpeg.")
             okay = False
@@ -40,6 +45,7 @@ def main() -> int:
     print(f"[INFO] IA local: {'lista' if ai['ready'] else 'ejecuta scripts/setup-ai.ps1 para activarla'}")
     for model in ai['models']:
         print(f"[INFO] Whisper {model['id']}: {'instalado' if model['installed'] else 'sin instalar'} (~{model['size_mb']} MB)")
+    print(f"[INFO] Argos opcional: {'entorno configurado' if argos_python() else 'edicion e importacion manual disponibles'}")
     return 0 if okay else 1
 
 

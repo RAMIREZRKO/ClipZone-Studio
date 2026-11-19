@@ -1,6 +1,7 @@
 """Subproceso cancelable. Lee PCM por bloques: no carga un vídeo largo en RAM."""
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -13,7 +14,9 @@ def run(audio: Path, model: Path, language: str, output: Path):
     import numpy as np
     import torch
     from .whisper_local import WhisperLocal
-    torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
+    requested = int(os.environ.get("CLIPZONE_WHISPER_THREADS", "4"))
+    torch.set_num_threads(max(1, min(requested, 6, os.cpu_count() or 1)))
+    torch.set_num_interop_threads(1)
     emit(20, "Cargando modelo Whisper")
     engine = WhisperLocal(model)
     duration = audio.stat().st_size / 32000
@@ -28,7 +31,8 @@ def run(audio: Path, model: Path, language: str, output: Path):
                 energies.append(round(float(np.sqrt(np.mean(samples[i:i + 16000] ** 2))), 5))
             # Omite bloques sin señal para reducir alucinaciones en silencio digital.
             if float(np.sqrt(np.mean(samples ** 2))) > .0003:
-                result = engine.transcribe_result(samples, detected_language)
+                with torch.inference_mode():
+                    result = engine.transcribe_result(samples, detected_language)
                 detected_language = result.get("language") or detected_language
                 for segment in result.get("segments", []):
                     if segment.get("no_speech_prob", 0) > .6 and segment.get("avg_logprob", 0) < -1:

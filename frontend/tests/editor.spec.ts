@@ -6,10 +6,11 @@ test('importar, recortar, encuadrar, reproducir, exportar y descargar', async ({
   page.on('pageerror', error => errors.push(error.message));
   await page.goto('/');
   await expect(page.getByText('Motor local listo')).toBeVisible();
-  await page.screenshot({ path: '../docs/capturas/editor-vacio.png', fullPage: true });
+  await page.screenshot({ path: '../test-results/screenshots/editor-vacio.png', fullPage: true });
   await page.getByLabel('Seleccionar vídeo', { exact: true }).setInputFiles(path.resolve('../demo/clipzone-demo.mp4'));
   await expect(page.locator('.video-frame video')).toBeVisible();
   await page.getByLabel('Nombre del clip', { exact: true }).fill('Mi clip de prueba');
+  await page.getByText('Ajuste de precisión', { exact: true }).click();
   await page.getByLabel('Entrada en segundos').fill('1');
   await page.getByLabel('Salida en segundos').fill('3');
   await page.getByRole('button', { name: '1:1', exact: true }).click();
@@ -27,7 +28,7 @@ test('importar, recortar, encuadrar, reproducir, exportar y descargar', async ({
   const current = await page.locator('.video-frame video').evaluate((video: HTMLVideoElement) => video.currentTime);
   expect(current).toBeGreaterThanOrEqual(2.99);
   expect(current).toBeLessThanOrEqual(3.01);
-  await page.screenshot({ path: '../docs/capturas/editor-con-video.png', fullPage: true });
+  await page.screenshot({ path: '../test-results/screenshots/editor-con-video.png', fullPage: true });
   await page.getByRole('button', { name: 'Exportar clip', exact: true }).click();
   const card = page.locator('.export-card').filter({ has: page.getByRole('heading', { name: 'Mi clip de prueba', exact: true }) }).first();
   await expect(card.getByText('Listo para compartir')).toBeVisible({ timeout: 30_000 });
@@ -43,7 +44,7 @@ test('importar, recortar, encuadrar, reproducir, exportar y descargar', async ({
   expect(file.suggestedFilename()).toBe('Mi clip de prueba.mp4');
   expect(await file.failure()).toBeNull();
   await page.getByRole('button', { name: 'Cerrar', exact: true }).click();
-  await page.screenshot({ path: '../docs/capturas/exportaciones.png', fullPage: true });
+  await page.screenshot({ path: '../test-results/screenshots/exportaciones.png', fullPage: true });
   await page.reload();
   await page.getByRole('button', { name: /Mis vídeos/ }).click();
   await expect(page.getByRole('heading', { name: 'clipzone-demo.mp4', exact: true }).first()).toBeVisible();
@@ -71,14 +72,12 @@ test('interfaz móvil, ayuda y funciones futuras claramente identificadas', asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const controls = page.locator('.settings-body');
   expect(await controls.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: '../docs/capturas/editor-movil.png', fullPage: true });
+  await page.screenshot({ path: '../test-results/screenshots/editor-movil.png', fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: /Momentos con IA/ }).click();
   await expect(page.getByRole('region', { name: 'Momentos con IA' })).toBeVisible();
   await page.getByRole('button', { name: /Subtítulos dinámicos/ }).click();
-  await expect(page.getByRole('dialog')).toContainText('Pendiente de implementar');
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).not.toBeVisible();
+  await expect(page.getByRole('region', { name: 'Subtítulos dinámicos' })).toBeVisible();
   await page.getByRole('button', { name: /Guía de inicio/ }).click();
   await expect(page.getByRole('dialog')).toContainText('De tu vídeo a tu primer clip');
   await page.keyboard.press('Escape');

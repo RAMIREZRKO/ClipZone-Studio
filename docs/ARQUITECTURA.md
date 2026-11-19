@@ -29,7 +29,7 @@ MP4/M4V H.264 con píxeles compatibles y AAC/MP3 puede reproducirse directamente
 
 Antes de escalar, FFmpeg normaliza los píxeles anamórficos a SAR 1:1. La autorrotación de FFmpeg se aplica al decodificar; los metadatos mostrados consideran la rotación. El modo `contain` escala manteniendo proporción y añade bandas negras centradas. `cover` aumenta la imagen conservando proporción y recorta según el foco X/Y. Los tamaños pares permiten codificar en `yuv420p`. El frontend usa `object-fit` y `object-position` para aproximar la composición; el reproductor del MP4 terminado muestra el resultado exacto.
 
-La previsualización de edición depende de la decodificación del navegador y no simula cambios de códec, color ni audio. La precisión final del recorte se realiza con recodificación, en lugar de copiar segmentos limitados por keyframes. Las guías de subtítulos no son un filtro de render en esta fase.
+La previsualización en directo depende de la decodificación del navegador. La precisión final del recorte se obtiene con recodificación. Vista exacta y Exportar comparten filtros, pistas y gráficos en FFmpeg, y las guías se mantienen en la interfaz.
 
 ## Ciclo de exportación
 
@@ -60,6 +60,13 @@ Máximo 20 trabajos pendientes de exportación. La cola es para una sola instanc
 | POST | `/api/jobs/{id}/cancel` | Cancela el trabajo |
 | GET | `/api/jobs/{id}/preview` | MP4 inline |
 | GET | `/api/jobs/{id}/download` | MP4 como descarga |
+| GET / POST | `/api/videos/{id}/captions` | Leer o guardar una pista separada de Whisper |
+| POST | `/api/videos/{id}/captions/generate` | Crear segmentos a partir de un análisis finalizado |
+| POST | `/api/videos/{id}/captions/translation/import` | Importar texto SRT/VTT preservando los tiempos |
+| POST | `/api/videos/{id}/captions/translation/local` | Traducir una selección con Argos local configurado |
+| GET / POST | `/api/templates` | Listar y guardar configuraciones de campaña |
+| POST / GET | `/api/assets` / `/api/assets/{id}` | Registrar y servir PNG administrados |
+| GET | `/api/jobs/{id}/subtitles.{srt|vtt}` | Descargar la pista relativa al MP4 |
 
 La API no acepta rutas arbitrarias del cliente y no devuelve rutas internas. Los identificadores se resuelven desde SQLite. `GET /docs` muestra los esquemas de entrada completos.
 
@@ -75,4 +82,12 @@ La tabla `analyses` se crea automáticamente al abrir una biblioteca existente, 
 
 La generación múltiple solo acepta IDs de momentos pertenecientes a un análisis completo; no admite rutas o intervalos arbitrarios desde el lote. Valida todas las selecciones, el original y la capacidad de 20 trabajos antes de encolar. Un lock compartido con la exportación manual evita que dos lotes consuman la misma capacidad al mismo tiempo. Los ajustes de cada exportación incluyen análisis, momento y puntuación de origen. Los cuatro destinos son `tiktok`, `reels`, `shorts` y `facebook`, con `custom` adicional.
 
-La fase 3 añadirá estilos y generación de ASS/SRT a partir de palabras; la fase 4 calculará posiciones de recorte en el tiempo. Los subtítulos dinámicos y el seguimiento de sujetos siguen pendientes.
+## Composición de la fase 3
+
+Se crean las tablas `caption_tracks`, `templates` y `assets` con `CREATE TABLE IF NOT EXISTS`. Las filas y los formatos de trabajo de versiones anteriores se leen con campos de composición opcionales. Una pista por vídeo contiene intervalos absolutos, palabras de referencia, texto editable y traducciones por código de idioma. Cada escritura requiere la revisión vigente. El análisis de origen conserva su contenido independiente.
+
+La cola toma una copia de la composición al encolar el proceso. Antes del render, los subtítulos se intersectan con el intervalo y se desplazan a partir del segundo cero. Los PNG se aplican en orden con su canal alfa. Los textos se convierten en eventos ASS y los subtítulos se componen encima de las capas. FFmpeg recibe nombres ASS generados internamente dentro del directorio de trabajo temporal, evitando incluir rutas de Windows o texto del usuario dentro del grafo de filtros. Las exportaciones pueden persistir una copia compacta de los cues para SRT y VTT.
+
+Las plantillas guardan estilo, idioma de salida, formato, encuadre, resolución y configuraciones de capa. Los PNG se abren mediante un identificador de SQLite y los ejemplos empiezan con un espacio para el archivo del usuario. El lote toma los ajustes del editor y recorta la pista de cada fragmento. Los tiempos de las capas se aplican desde el inicio de cada fragmento.
+
+Argos se ejecuta mediante un subproceso CPU con su entorno opcional. El worker fuerza un proveedor local y exige que el par directo esté instalado. Importar o editar traducciones conserva los tiempos y las palabras originales. El trabajo de Whisper y el de FFmpeg conservan sus colas de progreso y cancelación.
