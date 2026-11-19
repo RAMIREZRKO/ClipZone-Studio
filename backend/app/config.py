@@ -11,6 +11,7 @@ class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("CLIPZONE_DATA_DIR", ROOT / "data")))
     max_upload_bytes: int = field(default_factory=lambda: int(os.getenv("CLIPZONE_MAX_UPLOAD_GB", "20")) * 1024**3)
     frontend_dir: Path = ROOT / "frontend" / "dist"
+    model_dir: Path = field(default_factory=lambda: Path(os.getenv("CLIPZONE_MODEL_DIR", ROOT / "models" / "whisper")))
 
     def binary(self, name: str) -> str | None:
         configured = os.getenv(f"CLIPZONE_{name.upper()}")
@@ -20,5 +21,5 @@ class Settings:
         return str(local) if local.is_file() else shutil.which(name)
 
     def prepare(self) -> None:
-        for folder in ("uploads", "previews", "thumbnails", "exports"):
+        for folder in ("uploads", "previews", "thumbnails", "exports", "analysis"):
             (self.data_dir / folder).mkdir(parents=True, exist_ok=True)

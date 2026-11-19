@@ -1,4 +1,26 @@
-# Validación de la fase 1
+# Validación de ClipZone Studio
+
+## Versión 0.2 — fases 1 y 2
+
+Resultado final: **45 pruebas Python aprobadas, sin omisiones, y 4 pruebas de navegador aprobadas**. La compilación TypeScript/Vite, `pip check`, el diagnóstico de dependencias y la sintaxis de los cinco scripts PowerShell también son correctos.
+
+Se conserva la validación de la fase 1 detallada debajo. La fase 2 añadió:
+
+- Whisper `20250625` y PyTorch `2.15.0+cpu`; modelo multilingüe Tiny descargado del registro oficial y verificado por SHA256.
+- Inferencia real, sin sustituir el motor, sobre una muestra hablada de aproximadamente 38 segundos generada con la voz local de Windows. Resultado: **95 palabras con marcas de tiempo y cinco propuestas puntuadas**.
+- Generación de dos propuestas como MP4 de Facebook Reels, comprobando vídeo H.264, audio, 480×854 y descarga. El navegador también reproduce el resultado real.
+- Pruebas de configuración inválida, falta de audio/modelo, historial persistido, recuperación tras interrupción, cancelación, reutilización de transcripción y selección de IDs válidos.
+- Ranking con límites de duración, señales explicables, límites de puntuación, reducción de solapamientos y ausencia de propuestas inventadas cuando no hay habla utilizable.
+- Recorrido real de UI: elegir Facebook Reels, analizar en inglés, revisar transcripción, seleccionar dos tarjetas, cargarlas en el editor, generar el lote y previsualizar los MP4. Se comprobó también la reutilización al volver de Exportaciones.
+- Inspección de las capturas del panel de IA en escritorio y móvil, manteniendo el diseño negro/verde y sin desbordamientos.
+
+Las pruebas rápidas de análisis sustituyen solo la inferencia mediante una fixture de pruebas; extracción de audio, procesos, SQLite y render siguen siendo reales. La prueba marcada `whisper` y la de navegador con `CLIPZONE_REAL_AI_E2E=1` ejecutaron el modelo Tiny real en esta entrega.
+
+Capturas adicionales: [Momentos con IA](capturas/momentos-ia.png) y [Momentos con IA en móvil](capturas/momentos-ia-movil.png). Los modelos y las muestras de vídeo/audio siguen excluidos de Git.
+
+Límites: no se ha medido calidad en un corpus amplio ni rendimiento de Base/Small, GPU o vídeos de varias horas. El ranking es heurístico sobre texto generado por Whisper y señales de audio; no predice viralidad. La inferencia se divide en bloques de 60 s, por lo que las frases en sus límites pueden requerir ajuste manual. Los subtítulos dinámicos y el seguimiento de sujetos continúan pendientes.
+
+## Validación original de la fase 1
 
 Entrega verificada el **17 de noviembre de 2026** (America/Bogota), en Windows x64. Se usaron vídeos sintéticos generados localmente con FFmpeg; no se importó ni modificó ningún vídeo personal del equipo.
 
@@ -67,4 +89,4 @@ Se inspeccionaron las capturas reales en escritorio y móvil. Se corrigieron el 
 
 Los renders de integración utilizan muestras cortas a 480p; el editor ofrece también 720p y 1080p. No se ha hecho una prueba de carga con archivos cercanos al límite de 20 GB, todos los códecs existentes, HDR o GPU. Las exportaciones utilizan CPU. La reproducción y el color pueden variar según el decodificador del navegador y la fuente; el MP4 final puede previsualizarse para su revisión.
 
-Whisper tiene un adaptador opcional y contratos, pero no se ha instalado ni probado en esta fase. La detección de momentos, los subtítulos dinámicos y el seguimiento de sujetos no están implementados. El plan de aceptación de esas funciones está en [FASES.md](FASES.md).
+En la fase 1 Whisper solo disponía de un adaptador. Su implementación y validación real están documentadas en la sección de la versión 0.2. Los subtítulos dinámicos y el seguimiento de sujetos siguen pendientes en [FASES.md](FASES.md).

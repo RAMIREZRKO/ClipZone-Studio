@@ -74,6 +74,8 @@ test('interfaz móvil, ayuda y funciones futuras claramente identificadas', asyn
   await page.screenshot({ path: '../docs/capturas/editor-movil.png', fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: /Momentos con IA/ }).click();
+  await expect(page.getByRole('region', { name: 'Momentos con IA' })).toBeVisible();
+  await page.getByRole('button', { name: /Subtítulos dinámicos/ }).click();
   await expect(page.getByRole('dialog')).toContainText('Pendiente de implementar');
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).not.toBeVisible();

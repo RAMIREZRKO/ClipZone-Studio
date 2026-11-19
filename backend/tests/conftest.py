@@ -8,7 +8,7 @@ from app.main import create_app
 
 @pytest.fixture
 def settings(tmp_path):
-    return Settings(data_dir=tmp_path / "data", frontend_dir=tmp_path / "no-frontend")
+    return Settings(data_dir=tmp_path / "data", frontend_dir=tmp_path / "no-frontend", model_dir=tmp_path / "models")
 
 
 @pytest.fixture

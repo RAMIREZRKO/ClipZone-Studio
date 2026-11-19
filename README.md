@@ -2,7 +2,7 @@
 
 Editor de vídeo **local para Windows**, con Python, FastAPI, FFmpeg y React + TypeScript. Interfaz en español, negro y verde neón. Inspirado en el flujo de clipping de OpusClip, con diseño propio y sin servicios de pago.
 
-**Versión 0.1 · Fase 1 funcional.** Importa originales, selecciona un intervalo, previsualiza el encuadre, exporta un MP4 y revisa el resultado antes de descargarlo. La detección de momentos con IA y los subtítulos dinámicos son fases posteriores; no están activados en esta versión.
+**Versión 0.2 · Fases 1 y 2 funcionales.** Importa, recorta, previsualiza y exporta manualmente, o usa Whisper local para transcribir, detectar momentos puntuados y generar varios clips seleccionados. Incluye TikTok, Instagram Reels, YouTube Shorts y Facebook Reels. Los subtítulos dinámicos corresponden a la fase 3 y todavía no se imprimen en los vídeos.
 
 ## Ejecutar una instalación ya preparada
 
@@ -16,7 +16,7 @@ Abre [ClipZone Studio](http://127.0.0.1:8000). Cierra el servidor con `Ctrl+C`. 
 
 ## Instalar desde cero
 
-Requisitos: Windows 10/11 x64, **Python 3.12 recomendado** (mínimo 3.10), **Node.js 22.12+ o 24 LTS**, FFmpeg y FFprobe con `libx264` y AAC. RAM recomendada: 8 GB para edición; la IA futura requerirá más recursos. Reserva espacio para una copia del original, proxies y exportaciones. Se necesita internet para instalar paquetes y descargar FFmpeg; la edición funciona después sin conexión.
+Requisitos: Windows 10/11 x64, **Python 3.12 recomendado** (mínimo 3.10), **Node.js 22.12+ o 24 LTS**, FFmpeg y FFprobe con `libx264` y AAC. RAM recomendada: 8 GB para edición y Whisper Tiny en CPU; Base y Small requieren más tiempo y memoria. Reserva espacio para una copia del original, proxies y exportaciones. Se necesita internet para instalar paquetes y descargar FFmpeg; la edición funciona después sin conexión.
 
 1. Instala Python desde [python.org](https://www.python.org/downloads/windows/) y Node desde [nodejs.org](https://nodejs.org/en/download). Abre una terminal nueva.
 2. Descarga el proyecto como ZIP o clónalo con [Git](https://git-scm.com/downloads). Sustituye `TU_USUARIO` por el propietario del repositorio una vez publicado:
@@ -48,7 +48,7 @@ Diagnóstico independiente:
 
 ## Qué incluye
 
-| Función | Fase 1 |
+| Función | Versión 0.2 |
 |---|---|
 | Importación | MP4, MOV, MKV, WebM, AVI, M4V, MTS y M2TS; copia local; límite configurable de 20 GB |
 | Biblioteca | Originales, metadatos y miniaturas persistidos en SQLite |
@@ -57,10 +57,11 @@ Diagnóstico independiente:
 | Formatos | 9:16, 1:1, 4:5 y 16:9 |
 | Encuadre | Imagen completa con bandas o recorte para llenar; foco horizontal y vertical; sin estirar |
 | Resolución | 480, 720 o 1080 píxeles en el lado corto; dimensiones pares para H.264 |
-| Plataformas | Presets editables para TikTok, Reels y Shorts, más modo libre |
+| Plataformas | Cuatro plataformas: TikTok, Instagram Reels, YouTube Shorts y Facebook Reels, más modo libre |
 | Zona segura | Márgenes superior/inferior editables y guías visuales; no se imprimen en la exportación |
 | Exportación | MP4, vídeo H.264, audio AAC si existe, `yuv420p`, faststart; cola, progreso, cancelación y errores |
 | Revisión | Reproducción del MP4 terminado y descarga desde Exportaciones |
+| IA local | Whisper Tiny/Base/Small, palabras con tiempos, ranking editorial, selección múltiple y generación de clips |
 | Privacidad | Procesamiento en este equipo; sin cuentas, API externas, fuentes remotas ni analítica |
 
 Los presets son **puntos de partida de edición**, no una validación de las reglas actuales de cada plataforma. Se permite cambiarlos. En vertical, 1080 produce 1080×1920; en 1:1, 1080×1080; en 4:5, 1080×1350; en horizontal, 1920×1080. La duración mínima es 0,1 s y la máxima por clip, 1 hora. Se puede importar un original largo y exportar varios intervalos.
@@ -73,7 +74,7 @@ Los presets son **puntos de partida de edición**, no una validación de las reg
 4. Pulsa **Exportar clip**. Los trabajos se procesan uno a uno para limitar la carga de CPU.
 5. En **Exportaciones**, pulsa **Previsualizar** y revisa el archivo exacto antes de **Descargar**.
 
-La guía verde de subtítulos es solo una referencia. El MP4 exportado no contiene ese texto ni la guía. Whisper, la selección por IA y el render de subtítulos se desarrollarán en las siguientes fases.
+La guía verde de subtítulos es solo una referencia. El MP4 exportado no contiene ese texto ni la guía. Whisper y la selección por IA están disponibles en el panel **Momentos con IA**. El render de subtítulos corresponde a la siguiente fase.
 
 Puedes generar un vídeo sintético de 12 segundos con audio:
 
@@ -84,6 +85,37 @@ Puedes generar un vídeo sintético de 12 segundos con audio:
 Después importa `demo/clipzone-demo.mp4`. No se descarga contenido de terceros.
 
 El vídeo de demostración se genera en tu equipo y está excluido de Git, igual que los vídeos importados y exportados.
+
+## Fase 2: transcripción y clips automáticos
+
+La edición manual sigue funcionando sin instalar IA. Para activar el análisis, primero instala el proyecto y después ejecuta **una sola vez**, desde su carpeta:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-ai.ps1 -Model tiny
+```
+
+Esto instala `openai-whisper` y PyTorch, descarga el modelo oficial y verifica su SHA256. Tiny ocupa aproximadamente 76 MB, Base 145 MB y Small 484 MB; las dependencias añaden varios cientos de MB. Puedes instalar otro modelo cambiando `-Model tiny` por `-Model base` o `-Model small`. Los modelos se guardan en `models/whisper`, excluido de Git. Se necesita conexión para instalar y descargar; **el análisis y la exportación se ejecutan localmente, sin claves ni APIs de pago**. Los endpoints de análisis no descargan pesos de forma implícita.
+
+1. Importa un vídeo con voz y selecciona **Momentos con IA** en la barra lateral.
+2. Elige un modelo instalado, el idioma (o detección automática), duración mínima/máxima y número máximo de propuestas. Se admiten intervalos de 1 a 180 segundos y hasta 20 propuestas.
+3. Pulsa **Analizar vídeo**. El progreso recorre extracción de audio, carga del modelo, transcripción y ranking; puedes cancelar o seguir usando el editor.
+4. Revisa la transcripción y las tarjetas puntuadas. **Revisar en editor** carga el intervalo para escucharlo y ajustar un clip manualmente.
+5. Marca varias tarjetas, o **Seleccionar todos**. Configura la plataforma, formato, resolución y encuadre en el editor; esos ajustes se aplicarán a todo el lote.
+6. Pulsa **Generar seleccionados**. Cada MP4 aparece en Exportaciones con su progreso, vista previa y descarga.
+
+Los análisis y sus propuestas sobreviven a reinicios. El selector **Análisis guardados** permite recuperar un resultado anterior. Si mantienes el mismo modelo e idioma, **Reutilizar transcripción** permite cambiar duraciones o cantidad de propuestas sin ejecutar Whisper de nuevo. Para volver a inferir el audio, desmarca esa opción.
+
+La puntuación es editorial (0–100), calculada localmente a partir de la transcripción de Whisper: densidad de voz, preguntas o ideas con gancho, cierre de frase y energía relativa del audio. No se usa un LLM remoto ni se predice viralidad. El ranking inicial reconoce señales léxicas principalmente en español e inglés. Puede devolver menos propuestas si no hay suficientes fragmentos distintos. Un vídeo sin audio se rechaza; silencio o habla insuficiente pueden producir una transcripción vacía. Revisa el contexto y corrige los límites en el editor antes de compartir.
+
+Facebook Reels es la cuarta plataforma, con preset editable 9:16, 30 s, margen superior del 12 % e inferior del 22 %. Son guías de edición, no una validación de las normas de Facebook. También se puede exportar manualmente a esta plataforma.
+
+Para generar una muestra hablada sin descargar contenido, usa la voz integrada de Windows:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_ai_demo.ps1
+```
+
+Importa `demo/phase2-spoken-demo.mp4`, elige **Inglés** y prueba duraciones de 3 a 12 segundos. El script requiere una voz de Windows instalada; la muestra y su WAV permanecen fuera de Git.
 
 ## Desarrollo
 
@@ -129,6 +161,17 @@ npm run test:e2e
 
 Playwright inicia y cierra una API aislada; sus datos van a `test-results/e2e-data`, sin usar tu biblioteca. Verifica importación, recorte, reproducción, encuadre, render, vista previa, descarga, persistencia, tamaño móvil y diálogos. Capturas en `docs/capturas`; trazas de fallos en `test-results/browser`.
 
+La suite también comprueba análisis persistidos, cancelación, cache de transcripción, puntuación, validación de selecciones y generación múltiple. Las pruebas rápidas sustituyen únicamente la inferencia para ser reproducibles; la extracción y los renders son reales. La prueba Python marcada `whisper` ejecuta el modelo real cuando Tiny y la demo hablada están instalados; de lo contrario se omite con un motivo explícito.
+
+Para incluir también el flujo de IA real en el navegador, después de instalar Tiny y generar la muestra:
+
+```powershell
+# Desde frontend, con el puerto 8000 libre:
+$env:CLIPZONE_BROWSER_CHANNEL = 'msedge'
+$env:CLIPZONE_REAL_AI_E2E = '1'
+npm run test:e2e
+```
+
 ## Datos y configuración
 
 ```text
@@ -138,10 +181,12 @@ data/
   previews/         # proxies de reproducción
   thumbnails/       # JPEG
   exports/          # MP4 finales
+  analysis/         # PCM/JSON temporales; se limpian al terminar
 ```
 
 | Variable de entorno | Uso |
 |---|---|
+| `CLIPZONE_MODEL_DIR` | Carpeta de modelos Whisper; predeterminado: `models/whisper` |
 | `CLIPZONE_DATA_DIR` | Carpeta alternativa para datos locales |
 | `CLIPZONE_FFMPEG` | Ruta completa a `ffmpeg.exe` |
 | `CLIPZONE_FFPROBE` | Ruta completa a `ffprobe.exe` |
@@ -163,10 +208,15 @@ backend/app/
   main.py             # API, importación y streaming
   services/media.py   # FFprobe, encuadre y comandos FFmpeg
   services/jobs.py    # cola, progreso y cancelación
-  ai/contracts.py     # interfaces de transcripción y detección
-  ai/whisper_local.py # adaptador opcional, todavía sin conexión al editor
+  services/analysis.py # cola de análisis y cancelación del subproceso
+  ai/contracts.py     # palabras y contratos de IA
+  ai/whisper_local.py # adaptador al modelo local
+  ai/worker.py        # inferencia por bloques de 60 s en CPU
+  ai/detector.py      # candidatos, puntuación y eliminación de duplicados
+  ai/routes.py        # análisis, resultados y generación múltiple
 frontend/src/
   App.tsx             # editor, biblioteca y exportaciones
+  components/AnalysisPanel.tsx # configuración, propuestas, selección y transcripción
   api.ts              # cliente tipado y subida con progreso
   styles.css          # diseño adaptable negro / verde neón
 scripts/              # instalar, iniciar, diagnosticar, probar y generar demo

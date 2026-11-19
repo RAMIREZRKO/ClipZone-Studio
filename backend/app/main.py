@@ -5,6 +5,7 @@ import asyncio
 import logging
 import mimetypes
 import re
+from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -17,6 +18,9 @@ from .database import Database, now
 from .models import ClipRequest
 from .services.media import MediaError, MediaService
 from .services.jobs import JobQueue
+from .services.analysis import AnalysisQueue
+from .ai.routes import register_ai
+from .ai.models import capabilities
 
 logger = logging.getLogger("clipzone")
 SUPPORTED = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts"}
@@ -46,13 +50,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.db = Database(settings.data_dir / "clipzone.sqlite3")
         app.state.media = MediaService(settings)
         app.state.queue = JobQueue(app.state.db)
+        app.state.analysis_queue = AnalysisQueue(app.state.db, settings)
+        app.state.export_lock = Lock()
         # Archivos parciales nunca se muestran como vídeos importados.
         for path in (settings.data_dir / "uploads").glob("*.part"):
             path.unlink(missing_ok=True)
         yield
+        await asyncio.to_thread(app.state.analysis_queue.shutdown)
         await asyncio.to_thread(app.state.queue.shutdown)
 
-    app = FastAPI(title="ClipZone Studio", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="ClipZone Studio", version="0.2.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
@@ -83,8 +90,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/health")
     def health():
         dependencies = {name: bool(settings.binary(name)) for name in ("ffmpeg", "ffprobe")}
-        return {"status": "ok" if all(dependencies.values()) else "missing_dependencies", "version": "0.1.0",
-                "dependencies": dependencies, "ai_enabled": False, "max_upload_bytes": settings.max_upload_bytes}
+        return {"status": "ok" if all(dependencies.values()) else "missing_dependencies", "version": "0.2.0",
+                "dependencies": dependencies, "ai_enabled": capabilities(settings)["ready"], "max_upload_bytes": settings.max_upload_bytes}
 
     @app.get("/api/videos")
     def videos():
@@ -152,8 +159,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Sin miniatura.")
         return FileResponse(video["thumbnail_path"], media_type="image/jpeg")
 
-    @app.post("/api/clips", status_code=202)
-    def create_clip(body: ClipRequest):
+    def enqueue_clip(body: ClipRequest, provenance: dict | None = None):
         video = find_video(body.video_id)
         if body.end > video["duration"] + 0.01:
             raise HTTPException(422, "El final del clip supera la duración del vídeo.")
@@ -161,11 +167,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "El archivo original ya no está disponible.")
         output = settings.data_dir / "exports" / f"{uuid4().hex}.mp4"
         command = app.state.media.render_command(Path(video["source_path"]), output, body)
-        if sum(j["status"] in ("queued", "running") for j in app.state.db.list("jobs")) >= 20:
-            raise HTTPException(429, "Hay 20 trabajos pendientes. Espera a que terminen.")
         job = app.state.queue.submit(kind="export", video_id=video["id"], command=command, output=output,
-                                     duration=body.end - body.start, title=body.title.strip() or "Mi clip", settings=body.model_dump(mode="json"))
+                                     duration=body.end - body.start, title=body.title.strip() or "Mi clip",
+                                     settings={**body.model_dump(mode="json"), **(provenance or {})})
         return public_job(job)
+
+    @app.post("/api/clips", status_code=202)
+    def create_clip(body: ClipRequest):
+        with app.state.export_lock:
+            if sum(j["status"] in ("queued", "running") for j in app.state.db.list("jobs")) >= 20:
+                raise HTTPException(429, "Hay 20 trabajos pendientes. Espera a que terminen.")
+            return enqueue_clip(body)
+
+    register_ai(app, settings, find_video, enqueue_clip, public_job)
 
     @app.get("/api/jobs")
     def jobs():

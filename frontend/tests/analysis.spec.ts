@@ -1,0 +1,58 @@
+import { test, expect } from '@playwright/test';
+import path from 'node:path';
+
+test('Whisper real, puntuación, selección múltiple y Facebook Reels', async ({ page }) => {
+  test.skip(process.env.CLIPZONE_REAL_AI_E2E !== '1', 'Activar CLIPZONE_REAL_AI_E2E=1 con Tiny y la demo hablada instalados.');
+  test.setTimeout(180_000);
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await expect(page.getByText('Motor local listo')).toBeVisible();
+  await page.getByLabel('Seleccionar vídeo', { exact: true }).setInputFiles(path.resolve('../demo/phase2-spoken-demo.mp4'));
+  await expect(page.locator('.video-frame video')).toBeVisible();
+  await page.getByRole('button', { name: 'f Facebook Reels', exact: true }).click();
+  await page.getByLabel('Resolución', { exact: true }).selectOption('480');
+  await page.getByRole('button', { name: /Momentos con IA/ }).click();
+  await page.getByLabel('Idioma del audio').selectOption('en');
+  await page.getByLabel('Duración mínima IA').fill('3');
+  await page.getByLabel('Duración máxima IA').fill('12');
+  await page.getByLabel('Máximo de propuestas').fill('5');
+  await expect(page.getByRole('button', { name: 'Analizar vídeo', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Analizar vídeo', exact: true }).click();
+  await expect.poll(() => page.locator('.moment-card').count(), { timeout: 120_000 }).toBeGreaterThanOrEqual(2);
+  const cards = page.locator('.moment-card');
+  const scores = await page.locator('.moment-score strong').allTextContents();
+  expect(scores.every(value => +value >= 0 && +value <= 100)).toBe(true);
+  await page.getByText('Ver transcripción completa', { exact: true }).click();
+  await expect(page.locator('.transcript')).toContainText(/video/i);
+  await page.getByLabel('Seleccionar momento 1', { exact: true }).check();
+  await page.getByLabel('Seleccionar momento 2', { exact: true }).check();
+  await expect(page.locator('.batch-toolbar')).toContainText('2 seleccionados');
+  await expect(page.locator('.batch-toolbar')).toContainText('Facebook Reels');
+  const firstTitle = await cards.first().locator('h4').textContent();
+  await cards.first().getByRole('button', { name: 'Revisar en editor', exact: true }).click();
+  await expect(page.getByLabel('Nombre del clip', { exact: true })).toHaveValue(firstTitle!);
+  await page.locator('#ai-moments').scrollIntoViewIfNeeded();
+  await page.locator('#ai-moments').screenshot({ path: '../docs/capturas/momentos-ia.png' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.locator('#ai-moments').screenshot({ path: '../docs/capturas/momentos-ia-movil.png' });
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.getByRole('button', { name: 'Generar seleccionados', exact: true }).click();
+  const exports = page.locator('.export-card').filter({ hasText: 'Facebook Reels' });
+  await expect(exports).toHaveCount(2);
+  for (const card of await exports.all()) {
+    await expect(card.getByText('Listo para compartir')).toBeVisible({ timeout: 30_000 });
+  }
+  await exports.first().getByRole('button', { name: 'Previsualizar', exact: true }).click();
+  await expect.poll(() => page.locator('.export-preview').evaluate((v: HTMLVideoElement) => v.readyState)).toBeGreaterThanOrEqual(2);
+  const dimensions = await page.locator('.export-preview').evaluate((v: HTMLVideoElement) => [v.videoWidth, v.videoHeight]);
+  expect(dimensions).toEqual([480, 854]);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: /Editor de clips/ }).click();
+  await page.getByRole('button', { name: /Momentos con IA/ }).click();
+  await expect(cards.first()).toBeVisible();
+  await page.getByRole('button', { name: 'Analizar vídeo', exact: true }).click();
+  await expect(page.locator('.moments-toolbar')).toContainText('transcripción reutilizada', { timeout: 15_000 });
+  expect(errors).toEqual([]);
+});

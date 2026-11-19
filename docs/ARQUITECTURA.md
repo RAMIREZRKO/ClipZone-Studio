@@ -13,7 +13,10 @@ flowchart LR
     Q --> FF[FFmpeg / FFprobe]
     FF --> OUT[Proxies y MP4]
     OUT -->|HTTP Range| UI
-    AI[Whisper local · fase 2] -.-> Q
+    API --> AQ[Cola de análisis]
+    AQ --> AI[Whisper local · subproceso CPU]
+    AI --> DB
+    AQ --> Q
 ```
 
 ## Ciclo de importación
@@ -46,6 +49,12 @@ Máximo 20 trabajos pendientes de exportación. La cola es para una sola instanc
 | GET | `/api/videos/{id}/thumbnail` | Miniatura |
 | GET | `/api/videos/{id}/preview` | Original compatible o proxy |
 | POST | `/api/clips` | Encola un render |
+| GET | `/api/ai/capabilities` | Dependencias y modelos locales disponibles |
+| GET / POST | `/api/videos/{id}/analyses` | Historial / inicia análisis |
+| GET | `/api/analyses/{id}` | Estado y progreso del análisis |
+| GET | `/api/analyses/{id}/result` | Transcripción y momentos puntuados |
+| POST | `/api/analyses/{id}/cancel` | Cancela el análisis |
+| POST | `/api/clips/batch` | Genera los momentos seleccionados |
 | GET | `/api/jobs` | Trabajos persistidos |
 | GET | `/api/jobs/{id}` | Estado y progreso |
 | POST | `/api/jobs/{id}/cancel` | Cancela el trabajo |
@@ -54,8 +63,16 @@ Máximo 20 trabajos pendientes de exportación. La cola es para una sola instanc
 
 La API no acepta rutas arbitrarias del cliente y no devuelve rutas internas. Los identificadores se resuelven desde SQLite. `GET /docs` muestra los esquemas de entrada completos.
 
-## Extensión hacia IA
+## Análisis local de la fase 2
 
-`Transcriber` devuelve palabras con marcas de tiempo. `WhisperLocal` implementa el contrato usando un `.pt` local y `word_timestamps=True`; no descarga pesos implícitamente. `MomentDetector` describe el contrato de puntuación de intervalos, todavía sin implementación. En la fase 2 se añadirán tareas de transcripción, estados persistidos, cancelación y selección revisable. La exportación existente podrá recibir los intervalos sugeridos sin sustituir el servicio FFmpeg.
+`AnalysisQueue` usa un executor independiente de un worker y subprocesos cancelables. Primero ejecuta FFmpeg para extraer PCM mono a 16 kHz y después `app.ai.worker`, que carga el modelo desde `models/whisper`. La extracción y la inferencia nunca se ejecutan en el hilo HTTP. Los modelos no se descargan desde los endpoints. `scripts/download_model.py` descarga solo Tiny/Base/Small desde el registro oficial de Whisper y comprueba el SHA256.
 
-La fase 3 añadirá un modelo de estilos y generación de ASS/SRT a partir de palabras; un filtro de subtítulos se incorporará al servicio de medios. La fase 4 calculará posiciones de recorte a lo largo del tiempo. Esos módulos no están conectados al MVP ni se anuncian como funciones disponibles.
+El worker mantiene en memoria un bloque de 60 s, además del modelo. Omite silencio digital y filtra segmentos con alta probabilidad de no contener voz y baja confianza. Añade el desplazamiento del bloque a cada marca temporal. Los límites de bloque pueden afectar una palabra o frase; la revisión en el editor permite corregirlos. El PCM temporal necesita aproximadamente 1,92 MB por minuto y se elimina tras éxito, fallo o cancelación. El proceso padre gestiona FFmpeg y Whisper por separado para poder terminar el proceso activo sin dejar un decodificador huérfano.
+
+La tabla `analyses` se crea automáticamente al abrir una biblioteca existente, sin borrar ni migrar destructivamente datos. Cada análisis persiste opciones, estado y, al completarse, transcripción y momentos. Los endpoints de estado omiten el resultado grande; solo `/result` devuelve las palabras y propuestas. El historial conserva resultados anteriores. Los análisis interrumpidos se marcan como fallidos en el siguiente arranque y sus temporales se limpian. La reutilización exige coincidencia de vídeo, modelo e idioma.
+
+`detect_moments` agrupa palabras por puntuación y pausas; considera ventanas de duración configurable y las ordena por cobertura de voz, ritmo, señales léxicas de gancho, cierre y energía relativa. Suprime intervalos cuyo solapamiento supera el 35 % del fragmento menor. Cada tarjeta incluye razón y métricas. Es un ranking heurístico sobre una transcripción generada por IA, no una evaluación semántica con LLM ni una predicción de éxito.
+
+La generación múltiple solo acepta IDs de momentos pertenecientes a un análisis completo; no admite rutas o intervalos arbitrarios desde el lote. Valida todas las selecciones, el original y la capacidad de 20 trabajos antes de encolar. Un lock compartido con la exportación manual evita que dos lotes consuman la misma capacidad al mismo tiempo. Los ajustes de cada exportación incluyen análisis, momento y puntuación de origen. Los cuatro destinos son `tiktok`, `reels`, `shorts` y `facebook`, con `custom` adicional.
+
+La fase 3 añadirá estilos y generación de ASS/SRT a partir de palabras; la fase 4 calculará posiciones de recorte en el tiempo. Los subtítulos dinámicos y el seguimiento de sujetos siguen pendientes.

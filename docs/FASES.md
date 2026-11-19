@@ -13,17 +13,20 @@
 
 Criterio de aceptación: importar un archivo, elegir 1–3 s, exportarlo, comprobar duración y dimensiones con FFprobe y reproducir/descargar el MP4 desde la interfaz.
 
-## Fase 2 — Whisper y selección asistida (pendiente)
+## Fase 2 — Whisper y selección asistida (implementada)
 
-1. Instalar Whisper opcionalmente y permitir elegir un modelo local, mostrando tamaño y recursos necesarios antes de descargarlo.
-2. Extraer audio mono de 16 kHz, transcribir con marcas de tiempo por palabra y persistir el resultado.
-3. Implementar detección local basada inicialmente en estructura de frases, pausas, densidad de voz y señales de energía; añadir un modelo semántico local opcional si los recursos lo permiten.
-4. Proponer fragmentos puntuados con una razón legible, duraciones configurables y revisión humana. No prometer una predicción de viralidad.
-5. Seleccionar propuestas y generar varios clips a través de la cola ya existente.
+- Instalación explícita de Whisper/PyTorch y Tiny, Base o Small, con verificación SHA256 del modelo oficial.
+- Extracción local de audio PCM mono a 16 kHz; inferencia CPU por bloques de 60 s y palabras con tiempos.
+- Cola independiente con progreso, cancelación real del proceso y recuperación tras interrupciones.
+- Análisis persistidos, historial y reutilización de transcripción para ajustar las propuestas.
+- Ranking editorial de 0 a 100 por densidad de voz, preguntas/ideas con gancho, cierre y energía relativa. Sin predicción de viralidad.
+- Duraciones de 1–180 s, hasta 20 propuestas, reducción de duplicados y selección múltiple.
+- Revisión en el editor y generación de varios MP4 con la cola existente.
+- Facebook Reels como cuarta plataforma, conservando las otras tres y el modo libre.
 
-Existe un adaptador `WhisperLocal` que carga un archivo de pesos explícito; falta conectarlo a trabajos, almacenamiento, progreso y UI. `requirements-ai.txt` no se instala en el MVP. La integración de Whisper no está probada en esta entrega.
+Verificado con inferencia real de Whisper Tiny en CPU: la muestra hablada produjo 95 palabras y cinco propuestas. Se exportaron dos propuestas a Facebook Reels con dimensiones y audio comprobados. Las pruebas rápidas también cubren errores, reutilización y cancelación. Base/Small están disponibles para instalar, sin benchmark en esta entrega. La revisión manual del contexto sigue siendo necesaria.
 
-Criterio de aceptación: transcribir una muestra en español sin API, verificar que las palabras respetan el audio y que cada propuesta puede corregirse antes de renderizar. Probar CPU y cancelación, y medir RAM/tiempo con modelos tiny/base/small.
+Mejoras posteriores opcionales: segmentación de habla más avanzada, un modelo semántico local y medición de calidad en más idiomas y estilos de vídeo.
 
 ## Fase 3 — Subtítulos dinámicos (pendiente)
 
@@ -38,7 +41,7 @@ Criterio de aceptación: texto sincronizado en clips que no empiezan en cero, ac
 
 - Detección y seguimiento local de rostros/sujetos.
 - Suavizado del movimiento de recorte y corrección manual por puntos.
-- Exportaciones por lotes, duplicación de presets y borradores persistentes.
+- Ampliar las exportaciones por lotes, duplicación de presets y borradores persistentes.
 - Empaquetado Windows con instalador y revisión de licencias de FFmpeg/modelos.
 
 Criterio de aceptación: seguimiento estable entre escenas, ausencia de estiramiento, corrección manual y exportaciones reproducibles en un equipo Windows limpio.

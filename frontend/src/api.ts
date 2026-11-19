@@ -6,6 +6,7 @@ export interface Video {
 export interface ClipSettings {
   video_id: string; title: string; start: number; end: number; ratio: string; resolution: number;
   fit: 'contain' | 'cover'; platform: string; safe_top: number; safe_bottom: number; focus_x: number; focus_y: number;
+  score?: number; analysis_id?: string; moment_id?: string;
 }
 export interface Job {
   id: string; kind: 'export' | 'preview'; video_id: string; title: string;
@@ -14,6 +15,23 @@ export interface Job {
   size: number | null; created_at: string;
 }
 export interface Health { status: string; dependencies: Record<string, boolean>; version: string; max_upload_bytes: number }
+
+export interface AIModel { id: string; label: string; size_mb: number; installed: boolean }
+export interface AICapabilities { dependencies: Record<string, boolean>; models: AIModel[]; ready: boolean; install_command: string }
+export interface AnalysisOptions { model: string; language: string; min_duration: number; max_duration: number; max_clips: number; reuse_transcript: boolean }
+export interface Analysis {
+  id: string; video_id: string; status: Job['status']; progress: number; stage: string; error: string | null;
+  options: AnalysisOptions; created_at: string; reused_transcript: boolean;
+}
+export interface Moment {
+  id: string; start: number; end: number; score: number; title: string; text: string; reason: string;
+  metrics: { speech: number; hook: number; closure: number; energy: number };
+}
+export interface AnalysisResult {
+  transcript: { text: string; language: string; words: { text: string; start: number; end: number }[] };
+  moments: Moment[]; scoring_version: string;
+}
+export type RenderOptions = Pick<ClipSettings, 'ratio' | 'resolution' | 'fit' | 'platform' | 'safe_top' | 'safe_bottom' | 'focus_x' | 'focus_y'>;
 
 export async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/api${url}`, options);

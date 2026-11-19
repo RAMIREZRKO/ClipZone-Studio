@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 from app.config import Settings
+from app.ai.models import capabilities
 
 
 def main() -> int:
@@ -35,7 +36,10 @@ def main() -> int:
             okay = False
     print(f"[INFO] Datos locales: {settings.data_dir}")
     print(f"[INFO] Frontend compilado: {'si' if (settings.frontend_dir / 'index.html').is_file() else 'no'}")
-    print("[INFO] Whisper opcional: no se necesita en la fase 1.")
+    ai = capabilities(settings)
+    print(f"[INFO] IA local: {'lista' if ai['ready'] else 'ejecuta scripts/setup-ai.ps1 para activarla'}")
+    for model in ai['models']:
+        print(f"[INFO] Whisper {model['id']}: {'instalado' if model['installed'] else 'sin instalar'} (~{model['size_mb']} MB)")
     return 0 if okay else 1
 
 

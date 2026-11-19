@@ -1,8 +1,4 @@
-"""Adaptador opcional: solo se carga cuando se invoca explícitamente.
-
-Usa un modelo local previamente descargado. No descarga pesos en segundo plano.
-La integración en la cola y el editor corresponde a la fase 2.
-"""
+"""Adaptador Whisper local, cargado exclusivamente en el worker de análisis."""
 from pathlib import Path
 from .contracts import Word
 
@@ -17,7 +13,12 @@ class WhisperLocal:
             raise RuntimeError("Instala backend/requirements-ai.txt para usar Whisper.") from exc
         self.model = whisper.load_model(str(model_path), device=device)
 
-    def transcribe(self, source: Path, language: str | None = None) -> list[Word]:
-        result = self.model.transcribe(str(source), language=language, word_timestamps=True, fp16=False)
+    def transcribe_result(self, source, language: str | None = None) -> dict:
+        return self.model.transcribe(str(source) if isinstance(source, Path) else source, language=language,
+                                     word_timestamps=True, fp16=False, verbose=None, temperature=0,
+                                     condition_on_previous_text=False)
+
+    def transcribe(self, source, language: str | None = None) -> list[Word]:
+        result = self.transcribe_result(source, language)
         return [Word(text=w["word"].strip(), start=w["start"], end=w["end"])
                 for segment in result["segments"] for w in segment.get("words", [])]

@@ -1,1 +1,1 @@
-"""Contratos de la fase 2. El MVP no activa análisis automático."""
+"""Whisper local, ranking explicable y API de la fase 2."""
