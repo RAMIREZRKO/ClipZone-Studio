@@ -46,7 +46,11 @@ def register_ai(app, settings, find_video, enqueue_clip, public_job):
         video = find_video(identifier)
         if not video["has_audio"]:
             raise HTTPException(422, "Este vídeo no tiene audio. La detección utiliza el habla transcrita.")
-        if body.min_duration > video["duration"]:
+        if body.transcript_window is not None:
+            start, end = body.transcript_window
+            if body.model != "small" or not 0 <= start < end <= video["duration"] + .001 or not .1 <= end - start <= 3600:
+                raise HTTPException(422, "Selecciona un tramo válido para retranscribirlo con Whisper Small.")
+        elif body.min_duration > video["duration"]:
             raise HTTPException(422, "La duración mínima supera la duración del vídeo.")
         if not Path(video["source_path"]).is_file():
             raise HTTPException(404, "El archivo original ya no está disponible.")
@@ -66,6 +70,28 @@ def register_ai(app, settings, find_video, enqueue_clip, public_job):
                 return summary(app.state.analysis_queue.submit(find_video(identifier), body))
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @router.get("/videos/{identifier}/hook-titles")
+    def hook_titles(identifier: str, start: float = 0, end: float | None = None):
+        video = find_video(identifier)
+        end = video["duration"] if end is None else end
+        if not 0 <= start < end <= video["duration"] + .01:
+            raise HTTPException(422, "El intervalo del clip no es válido.")
+        titles = []
+        for item in app.state.db.list("analyses"):
+            if item["video_id"] != identifier or item["status"] != "completed":
+                continue
+            result = item["result"]
+            moments = sorted(result["moments"], key=lambda moment: moment["score"], reverse=True)
+            titles.extend(moment["title"] for moment in moments if moment["start"] < end and moment["end"] > start)
+            words = [word["text"].strip() for word in result["transcript"]["words"]
+                     if word["start"] < end and word["end"] > start]
+            if words:
+                titles.append(" ".join(words[:10])[:90])
+        for candidate in app.state.db.list("autoclips"):
+            if candidate.get("video_id") == identifier:
+                titles.append(candidate["title"])
+        return list(dict.fromkeys(title.strip() for title in titles if title.strip()))[:5]
 
     @router.get("/analyses/{identifier}")
     def analysis_status(identifier: str):

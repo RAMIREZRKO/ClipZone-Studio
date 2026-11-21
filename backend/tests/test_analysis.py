@@ -121,6 +121,25 @@ def test_invalid_batch_selection_has_no_partial_jobs(client, sample_video, fake_
     assert client.get('/api/jobs').json() == []
 
 
+def test_small_retranscribes_selected_range_and_suggests_a_hook(client, sample_video, fake_engine, monkeypatch):
+    monkeypatch.setattr('app.ai.routes.capabilities', lambda _: {
+        'dependencies': {'whisper': True}, 'models': [{'id': 'small', 'installed': True}],
+    })
+    video = upload(client, sample_video)
+    base = f"/api/videos/{video['id']}"
+    response = client.post(base + '/analyses', json={'model': 'small', 'transcript_window': [.5, 1.7], 'cpu_threads': 2})
+    assert response.status_code == 202, response.text
+    identifier = response.json()['id']
+    assert wait(client, f'/api/analyses/{identifier}')['status'] == 'completed'
+    result = client.get(f'/api/analyses/{identifier}/result').json()
+    assert result['moments'] == []
+    assert result['transcript']['words'][0]['start'] == .5
+    assert all(.5 <= word['start'] < word['end'] <= 1.7 for word in result['transcript']['words'])
+    assert client.get(base + '/captions').json()['segments'] == []
+    titles = client.get(base + '/hook-titles?start=0.5&end=1.7').json()
+    assert titles and titles[0].startswith('¿Cómo')
+
+
 @pytest.mark.parametrize('options', [{'model': '../tiny'}, {'language': 'unknown'}, {'min_duration': 20, 'max_duration': 10}, {'max_clips': 21}, {'min_duration': -1}])
 def test_invalid_analysis_options(client, sample_video, options):
     video = upload(client, sample_video)

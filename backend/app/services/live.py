@@ -7,24 +7,38 @@ import subprocess
 from threading import Lock
 from typing import Callable, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..config import Settings
 from ..database import now
+from ..storage_location import CAPTURE_STOP, LocationError
 from .direct_capture import DirectSaveRequest, SourceRequest, StartRequest
 from .library import SUPPORTED_VIDEO, VideoLibrary
 from .media import CREATE_NO_WINDOW, MediaError
+from .multistream import CaptureLimit, StreamerSettings
 from .obs import LiveError, ObsSession, obs_session
 
 logger = logging.getLogger("clipzone.live")
-MIN_FREE = 128 * 1024**2
+MIN_FREE = CAPTURE_STOP
 MAX_REPLAY_SECONDS = 90
 
 
 class CaptureRequest(BaseModel):
     seconds: Literal[30, 60, 90]
+
+
+def check_obs_idle(settings: Settings) -> None:
+    connected = False
+    try:
+        with obs_session(int(settings.obs_port), settings.obs_password) as session:
+            connected = True
+            if session.request("GetReplayBufferStatus").get("outputActive") is True:
+                raise LocationError("Detén el búfer de repetición de OBS antes de migrar el almacenamiento.")
+    except LiveError as exc:
+        if connected or exc.code not in {"obs_offline", "obs_timeout"}:
+            raise LocationError("No se pudo confirmar que OBS esté inactivo. Detén el búfer y revisa la conexión de OBS.") from exc
 
 
 class LiveCapture:
@@ -95,8 +109,8 @@ class LiveCapture:
             folder = self.replay_dir()
             result["replay_dir"] = str(folder)
             result["replay_free_bytes"] = self.free(folder)
-            if min(result["library_free_bytes"], result["replay_free_bytes"]) < MIN_FREE:
-                raise LiveError("disk_full", "Se necesitan al menos 128 MiB libres en los discos de OBS y de ClipZone.")
+            if min(result["library_free_bytes"], result["replay_free_bytes"]) <= MIN_FREE:
+                raise LiveError("disk_full", "Se necesitan más de 5 GB libres en los discos de OBS y de ClipZone.")
         except LiveError as exc:
             storage_error = exc
         try:
@@ -112,6 +126,24 @@ class LiveCapture:
         except LiveError as exc:
             result.update(error=str(exc), error_code=exc.code)
         return result
+
+    def stop_for_low_storage(self) -> None:
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
+            folder = self.replay_dir()
+            if min(self.free(folder), self.free(self.settings.data_dir)) > MIN_FREE:
+                return
+            with obs_session(self.port(), self.settings.obs_password) as session:
+                if session.request("GetReplayBufferStatus").get("outputActive") is True:
+                    self.profile(session, folder)
+                    session.request("StopReplayBuffer")
+                    logger.warning("OBS: búfer de repetición detenido al llegar al límite de espacio.")
+        except LiveError:
+            # Si OBS está desconectado o usa otra carpeta, no hay un búfer autorizado que detener.
+            return
+        finally:
+            self.lock.release()
 
     @staticmethod
     def replay_file(value: str, folder: Path) -> Path:
@@ -144,7 +176,7 @@ class LiveCapture:
         self.media.require("ffmpeg")
         self.media.require("ffprobe")
         folder = self.replay_dir()
-        if min(self.free(folder), self.free(self.settings.data_dir)) < MIN_FREE:
+        if min(self.free(folder), self.free(self.settings.data_dir)) <= MIN_FREE:
             raise LiveError("disk_full", "Se necesitan al menos 128 MiB libres en los discos de OBS y de ClipZone.", 507)
         with obs_session(self.port(), self.settings.obs_password, outputs=True) as session:
             if session.request("GetReplayBufferStatus").get("outputActive") is not True:
@@ -220,25 +252,46 @@ def register_live(app: FastAPI, public_video: Callable[[dict], dict]):
         return serialize(capture, video)
 
     @app.get("/api/live/direct/status")
-    def direct_status():
-        return app.state.direct.status()
+    def direct_status(slot: int = Query(0, ge=0, le=1), streamer: str | None = None):
+        return app.state.multistream.capture_status(streamer, slot)
+
+    @app.get("/api/live/direct/channels")
+    def direct_channels():
+        return app.state.multistream.overview()
+
+    @app.put("/api/live/direct/settings")
+    def direct_settings(body: CaptureLimit):
+        return app.state.multistream.configure_limit(body)
 
     @app.post("/api/live/direct/probe")
-    def direct_probe(body: SourceRequest):
-        return app.state.direct.inspect(body.url)
+    def direct_probe(body: SourceRequest, streamer: str | None = None):
+        return app.state.multistream.inspect(body, streamer)
+
+    @app.get("/api/live/streamers")
+    def streamer_templates():
+        return app.state.db.list("streamers")
+
+    @app.post("/api/live/streamers")
+    def streamer_template(body: StreamerSettings, streamer: str | None = None):
+        return app.state.multistream.update(body, streamer)
+
+    @app.delete("/api/live/streamers/{identifier}")
+    def remove_streamer(identifier: str):
+        app.state.multistream.remove(identifier)
+        return {"id": identifier}
 
     @app.post("/api/live/direct/start", status_code=202)
-    def direct_start(body: StartRequest):
-        return app.state.direct.start(body)
+    def direct_start(body: StartRequest, slot: int = Query(0, ge=0, le=1), streamer: str | None = None):
+        return app.state.multistream.start(body, streamer, slot)
 
     @app.post("/api/live/direct/stop")
-    def direct_stop():
-        return app.state.direct.stop()
+    def direct_stop(slot: int = Query(0, ge=0, le=1), streamer: str | None = None):
+        return app.state.multistream.stop(streamer, slot)
 
     @app.post("/api/live/direct/captures", status_code=201)
-    def direct_save(body: DirectSaveRequest):
+    def direct_save(body: DirectSaveRequest, slot: int = Query(0, ge=0, le=1), streamer: str | None = None):
         try:
-            capture, video = app.state.direct.save(body.seconds)
+            capture, video = app.state.multistream.save(body.seconds, streamer, slot)
         except MediaError as exc:
             raise LiveError("capture_media", str(exc), 422) from exc
         return serialize(capture, video)

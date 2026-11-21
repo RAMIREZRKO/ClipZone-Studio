@@ -6,11 +6,20 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 
-TABLES = {"videos", "jobs", "analyses", "removals", "caption_tracks", "templates", "assets", "autoclips"}
+TABLES = {"videos", "jobs", "analyses", "removals", "caption_tracks", "templates", "assets", "autoclips", "streamers",
+          "settings"}
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, kind, value, traceback):
+        try:
+            return super().__exit__(kind, value, traceback)
+        finally:
+            self.close()
 
 
 class Database:
@@ -28,10 +37,12 @@ class Database:
                 CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS live_captures (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS autoclips (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS streamers (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             """)
 
     def connect(self):
-        return sqlite3.connect(self.path, timeout=30)
+        return sqlite3.connect(self.path, timeout=30, factory=ClosingConnection)
 
     def put(self, table: str, item: dict) -> dict:
         assert table in TABLES
@@ -50,6 +61,11 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(f"SELECT payload FROM {table} ORDER BY rowid DESC LIMIT ?", (limit,)).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def delete(self, table: str, identifier: str) -> None:
+        assert table in TABLES
+        with self.connect() as conn:
+            conn.execute(f"DELETE FROM {table} WHERE id=?", (identifier,))
 
     def put_live_video(self, video: dict, capture: dict, candidate: dict | None = None) -> None:
         with self.connect() as conn:

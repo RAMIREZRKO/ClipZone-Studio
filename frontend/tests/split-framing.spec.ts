@@ -281,6 +281,63 @@ async function sampledColors(surface: Locator, points: [number, number][]) {
   }, points);
 }
 
+test('el texto gancho en la unión coincide en directo, en Vista exacta y en el MP4', async ({ page, request }, info) => {
+  const source = info.outputPath('fondo del texto gancho.mp4');
+  mkdirSync(path.dirname(source), { recursive: true });
+  const bundled = path.resolve('../tools/ffmpeg/bin/ffmpeg.exe');
+  const ffmpeg = process.env.CLIPZONE_FFMPEG || (existsSync(bundled) ? bundled : 'ffmpeg');
+  const picture = 'color=blue:size=640x360:rate=24,drawbox=0:0:240:115:color=green:t=fill';
+  execFileSync(ffmpeg, ['-v', 'error', '-y', '-f', 'lavfi', '-i', picture, '-t', '0.8',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', source], { timeout: 15_000 });
+  await page.goto('/');
+  await expect(page.getByText('Motor local listo')).toBeVisible();
+  await page.getByLabel('Seleccionar vídeo', { exact: true }).setInputFiles(source);
+  const button = (name: string) => page.getByRole('button', { name, exact: true });
+  const video = page.locator('.video-frame video');
+  await expect(video).toBeVisible();
+  await page.getByLabel('Resolución', { exact: true }).selectOption('480');
+  await button('Streamer + Gameplay').click();
+  await page.getByLabel('Distribución vertical').selectOption('50');
+  const panel = page.getByRole('region', { name: 'Gráficos y plantillas' });
+  await panel.getByRole('button', { name: 'Crear texto gancho' }).click();
+  await expect(panel.getByLabel('Tamaño a 1080p (px)')).toHaveValue('44');
+  await expect(panel.getByLabel('Color del texto')).toHaveValue('#ffffff');
+  await expect(panel.getByLabel('Posición del gancho')).toHaveValue('split');
+  await panel.getByLabel('Texto gancho', { exact: true }).fill('Ahora empieza el clip');
+  await panel.getByLabel('Color del texto').fill('#ff00ff');
+  await panel.getByLabel('Nombre del estilo').fill('Gancho de prueba');
+  await button('Guardar estilo de gancho').click();
+  await expect(panel.getByText('Estilo de gancho guardado.')).toBeVisible();
+  await panel.getByLabel('Fuente', { exact: true }).selectOption('Poppins');
+  const style = await request.get('/api/templates');
+  const saved = (await style.json()).find((template: { kind?: string }) => template.kind === 'hook');
+  await panel.getByLabel('Aplicar estilo de gancho').selectOption(saved.id);
+  await expect(panel.getByLabel('Fuente', { exact: true })).toHaveValue('Arial');
+  await expect(page.getByLabel('Distribución vertical')).toHaveValue('50');
+  const art = page.locator('.text-raster');
+  await expect.poll(() => captionCenter(art)).not.toBeNull();
+  const [artX, artY] = (await captionCenter(art))!;
+  const frame = (await page.locator('.video-frame').boundingBox())!;
+  const box = (await art.boundingBox())!;
+  const x = (box.x + artX * box.width - frame.x) / frame.width;
+  const y = (box.y + artY * box.height - frame.y) / frame.height;
+  expect(x).toBeCloseTo(.5, 2);
+  expect(y).toBeCloseTo(.5, 2);
+  await button('Vista exacta').click();
+  await expect(video).toHaveAttribute('src', /\/api\/jobs\//);
+  await expect.poll(() => captionCenter(video)).not.toBeNull();
+  const [exactX, exactY] = (await captionCenter(video))!;
+  expect(exactX).toBeCloseTo(x, 2);
+  expect(exactY).toBeCloseTo(y, 2);
+  const exact = await request.get((await video.getAttribute('src'))!);
+  const submitted = page.waitForResponse(r => r.url().endsWith('/api/clips') && r.request().method() === 'POST');
+  await button('Exportar clip').click();
+  const { id } = await (await submitted).json();
+  await expect.poll(async () => (await (await request.get(`/api/jobs/${id}`)).json()).status).toBe('completed');
+  const exported = await request.get(`/api/jobs/${id}/download`);
+  expect((await exported.body()).equals(await exact.body())).toBe(true);
+});
+
 test('excluye la cámara de inmediato, limita el desplazamiento y conserva las regiones', async ({ page, request }, info) => {
   const source = info.outputPath('gameplay con cámara incrustada.mp4');
   mkdirSync(path.dirname(source), { recursive: true });

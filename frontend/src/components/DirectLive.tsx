@@ -1,28 +1,49 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { LoaderCircle, Radio, Square } from 'lucide-react';
-import { request, seconds } from '../api';
+import { useState } from 'react';
+import { HardDrive, LoaderCircle, Radio, Square } from 'lucide-react';
+import { request, seconds, sizeLabel, type StreamerTemplate } from '../api';
+
+export const directLengths = [30, 60, 90, 120, 300] as const;
+type DirectLength = typeof directLengths[number];
+type BroadcastState = 'live' | 'scheduled' | 'vod' | 'offline' | 'ended';
 
 interface DirectStatus {
-  installed: boolean;
   state: 'idle' | 'connecting' | 'capturing' | 'reconnecting' | 'stopping' | 'stopped' | 'ended' | 'error';
-  url: string | null;
   quality: string | null;
-  platform: string | null;
   elapsed: number;
   buffer_seconds: number;
+  buffer_ready?: boolean;
   bytes: number;
   max_bytes: number;
-  free_bytes: number | null;
   saving: boolean;
   retries: number;
   max_retries: number;
   message: string | null;
 }
 interface ProbeResult {
-  url: string;
-  platform: string;
   live: boolean;
   qualities: string[];
+  broadcast_state?: BroadcastState;
+}
+export const captureLimits = [4, 6, 8, 10] as const;
+export type CaptureLimit = typeof captureLimits[number];
+
+export interface DirectChannel extends StreamerTemplate {
+  quality: string | null;
+  seconds: DirectLength;
+  capture: DirectStatus;
+  connection?: 'unknown' | 'checking' | 'online' | 'offline';
+  qualities?: string[];
+  broadcast_state?: BroadcastState | null;
+  autoclip: { stage: string; options: { enabled: boolean } };
+}
+export interface ChannelOverview {
+  channels: DirectChannel[];
+  active: number;
+  max_active: CaptureLimit;
+  installed: boolean;
+  bytes: number;
+  max_bytes: number;
+  free_bytes: number | null;
 }
 
 const stateLabels: Record<DirectStatus['state'], string> = {
@@ -35,140 +56,131 @@ const stateLabels: Record<DirectStatus['state'], string> = {
   ended: 'Directo finalizado',
   error: 'Captura interrumpida',
 };
+const autoLabels: Record<string, string> = {
+  disabled: 'Desactivado', waiting: 'En espera', listening: 'Analizando audio',
+  collecting: 'Reuniendo el clip', waiting_whisper: 'En cola para Whisper', transcribing: 'Transcribiendo', saving: 'Guardando',
+  skipped: 'Candidato omitido', error: 'Error',
+};
 const activeStates: DirectStatus['state'][] = ['connecting', 'capturing', 'reconnecting', 'stopping'];
+const connectionLabels = {
+  unknown: 'Directo sin comprobar', checking: 'Comprobando…', online: 'Canal en directo',
+  offline: 'El canal no está en directo',
+};
+const broadcastLabels: Record<BroadcastState, string> = {
+  live: 'Canal en directo', scheduled: 'Transmisión programada', vod: 'Vídeo bajo demanda (VOD)',
+  offline: 'El canal no está en directo', ended: 'Directo finalizado',
+};
+export const canSaveBuffer = (capture: DirectStatus) =>
+  (capture.buffer_ready ?? capture.buffer_seconds > 0) && !capture.saving;
 export const platformLabel = (platform: string | null | undefined) =>
-  platform === 'kick' ? 'Kick' : platform === 'twitch' ? 'Twitch' : 'Captura directa';
+  platform === 'kick' ? 'Kick' : platform === 'twitch' ? 'Twitch' : platform === 'youtube' ? 'YouTube' : 'Captura directa';
 
-function post<T>(resource: string, body?: object) {
-  return request<T>(`/live/direct/${resource}`, {
-    method: 'POST',
-    ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
+export function channelQuery(id: string) {
+  return '?streamer=' + encodeURIComponent(id);
+}
+
+export function saveChannel(url: string, options?: Pick<Partial<DirectChannel>, 'quality' | 'seconds' | 'template_id'>, existingId?: string) {
+  return request<StreamerTemplate>('/live/streamers' + (existingId ? channelQuery(existingId) : ''), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, ...options }),
   });
 }
 
-export function useDirectLive(active: boolean) {
-  const [status, setStatus] = useState<DirectStatus | null>(null);
-  const [url, setUrl] = useState('');
+export function DirectControls({ entry, selected, installed, atLimit, saving, onSelect, onChange, onSave }: {
+  entry: DirectChannel;
+  selected: boolean;
+  installed: boolean;
+  atLimit: boolean;
+  saving: boolean;
+  onSelect: () => void;
+  onChange: () => Promise<void>;
+  onSave: () => Promise<void>;
+}) {
   const [probe, setProbe] = useState<ProbeResult | null>(null);
-  const [quality, setQuality] = useState('');
-  const [working, setWorking] = useState<'probe' | 'start' | 'stop' | null>(null);
+  const [working, setWorking] = useState<'probe' | 'start' | 'stop' | 'remove' | 'settings' | null>(null);
   const [error, setError] = useState('');
-  const [statusError, setStatusError] = useState('');
-  const statusSequence = useRef(0);
-  const commandInFlight = useRef(false);
-  const running = status !== null && activeStates.includes(status.state);
+  const { capture, url, quality } = entry;
+  const [platform, channel] = entry.id.split(':');
+  const channelName = entry.name ?? channel;
+  const running = activeStates.includes(capture.state);
+  const connection = working === 'probe' ? 'checking' : entry.connection ?? (probe ? (probe.live ? 'online' : 'offline') : 'unknown');
+  const probedQualities = entry.qualities ?? probe?.qualities;
+  const qualities = running && capture.quality ? [capture.quality] : probedQualities?.length ? probedQualities :
+    connection !== 'offline' && quality ? [quality] : [];
+  const selectedQuality = running ? capture.quality : quality && qualities.includes(quality) ? quality : qualities[0];
+  const canSave = canSaveBuffer(capture) && !saving && !working;
+  const checking = connection === 'checking';
+  const broadcast = entry.broadcast_state ?? probe?.broadcast_state;
+  const stateLabel = running ? stateLabels[capture.state] : !checking && broadcast ? broadcastLabels[broadcast] : connectionLabels[connection];
 
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    const sequence = ++statusSequence.current;
-    try {
-      const latest = await request<DirectStatus>('/live/direct/status', { signal });
-      if (signal?.aborted || sequence !== statusSequence.current) return;
-      setStatus(latest);
-      setStatusError('');
-    } catch (cause) {
-      if (!signal?.aborted && sequence === statusSequence.current) setStatusError((cause as Error).message);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!active) return;
-    const controller = new AbortController();
-    const update = () => { if (!document.hidden) void refresh(controller.signal); };
-    update();
-    const poll = window.setInterval(update, 1000);
-    document.addEventListener('visibilitychange', update);
-    return () => {
-      controller.abort();
-      window.clearInterval(poll);
-      document.removeEventListener('visibilitychange', update);
-    };
-  }, [active, refresh]);
-
-  function changeUrl(value: string) {
-    setUrl(value);
-    setProbe(null);
-    setQuality('');
-    setError('');
-  }
-
-  async function command(action: 'probe' | 'start' | 'stop') {
-    if (commandInFlight.current) return;
-    commandInFlight.current = true;
+  async function command(action: NonNullable<typeof working>, options?: Pick<Partial<DirectChannel>, 'quality' | 'seconds'>) {
     setWorking(action);
     setError('');
     try {
-      if (action === 'probe') {
-        setProbe(null);
-        setQuality('');
-        const result = await post<ProbeResult>('probe', { url });
-        setUrl(result.url);
-        setProbe(result);
-        setQuality(result.qualities[0] ?? '');
+      if (action === 'remove') {
+        await request('/live/streamers/' + encodeURIComponent(entry.id), { method: 'DELETE' });
+      } else if (action === 'settings') {
+        await saveChannel(url, options, entry.id);
       } else {
-        const result = await post<DirectStatus>(action, action === 'start' ? { url, quality } : undefined);
-        statusSequence.current++;
-        setStatus(result);
+        const result = await request<ProbeResult | DirectStatus>(`/live/direct/${action}${channelQuery(entry.id)}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(action === 'start' ? { url, quality: selectedQuality } : { url }),
+        });
+        if (action === 'probe' && 'qualities' in result) {
+          setProbe(result);
+        }
       }
+      await onChange();
     } catch (cause) {
       setError((cause as Error).message);
+      await onChange();
     } finally {
-      commandInFlight.current = false;
       setWorking(null);
     }
   }
 
-  return { status, url, probe, quality, working, error, statusError, running, refresh, changeUrl, setQuality, command };
-}
-
-export function DirectControls({ direct }: { direct: ReturnType<typeof useDirectLive> }) {
-  const { status, probe, running, working } = direct;
-  const selected = running ? status?.quality ?? '' : direct.quality;
-  const qualities = running && selected ? [selected] : probe?.qualities ?? [];
-  const state = status?.state;
-  const message = direct.error || direct.statusError || status?.message;
-  const error = direct.error || direct.statusError || state === 'error';
-  return <>
+  return <article className="live-channel" aria-label={platformLabel(platform) + ' · ' + channelName}>
+    <header className="live-channel-heading">
+      <div><h3>{channelName}</h3><span>{platformLabel(platform)}</span></div>
+      <button type="button" className="secondary" disabled={running || checking || !!working || saving || capture.saving}
+        title="Retira el canal y su búfer temporal" onClick={() => void command('remove')}>Eliminar canal</button>
+    </header>
     <div className="live-status-row">
-      <span className="live-state" data-online={state === 'capturing' || undefined} role="status"><i/>
-        {state ? stateLabels[state] : 'Consultando captura…'}
-      </span>
-      {running && <span>{platformLabel(status?.platform)} · {status?.quality}</span>}
-      {status?.state === 'reconnecting' && <span>{status.retries}/{status.max_retries} reintentos</span>}
+      <span className="live-state" data-online={capture.state === 'capturing' || connection === 'online' || undefined}
+        role="status"><i/>{stateLabel}</span>
+      {!running && capture.state !== 'idle' && stateLabel !== stateLabels[capture.state] && <span>{stateLabels[capture.state]}</span>}
+      {capture.state === 'reconnecting' && <span>{capture.retries}/{capture.max_retries} reintentos</span>}
+      <span>AutoClipping · {autoLabels[entry.autoclip.stage]}</span>
     </div>
-    <form className="live-source-form" onSubmit={event => { event.preventDefault(); void direct.command('probe'); }}>
-      <label htmlFor="live-source-url">URL del directo autorizado</label>
-      <div>
-        <input id="live-source-url" type="url" maxLength={500} value={running ? status?.url ?? direct.url : direct.url}
-          placeholder="https://www.twitch.tv/tu_canal" disabled={running || !!working} required
-          onChange={event => direct.changeUrl(event.target.value)}/>
-        <button type="submit" className="secondary" disabled={running || !!working || !direct.url.trim() || status?.installed !== true}>
-          {working === 'probe' ? <LoaderCircle className="spin" size={16}/> : null}
-          {working === 'probe' ? 'Comprobando…' : 'Comprobar directo'}
-        </button>
-      </div>
-    </form>
-    {probe && !running && <p className="live-note" role="status">
-      {platformLabel(probe.platform)} · {probe.live ? 'Canal en directo' : 'El canal no está en directo'}
-    </p>}
     <div className="live-capture-options">
-      <label>Calidad del directo<select value={selected} disabled={running || !!working || !qualities.length}
-        onChange={event => direct.setQuality(event.target.value)}>
+      <label>Calidad del directo<select value={selectedQuality ?? ''} disabled={running || checking || !!working || !qualities.length}
+        onChange={event => void command('settings', { quality: event.target.value })}>
         {!qualities.length && <option value="">Comprueba el directo</option>}
-        {qualities.map(quality => <option value={quality} key={quality}>{quality === 'source' ? 'Fuente' : quality === 'live' ? 'Disponible' : quality}</option>)}
+        {qualities.map(value => <option value={value} key={value}>{value === 'source' ? 'Fuente' : value === 'live' ? 'Disponible' : value}</option>)}
       </select></label>
-      <button className="secondary" disabled={!probe?.live || !selected || running || !!working || status?.saving}
-        onClick={() => void direct.command('start')}><Radio size={16}/>Iniciar captura</button>
-      <button className="secondary" disabled={!running || state === 'stopping' || !!working}
-        onClick={() => void direct.command('stop')}><Square size={14}/>Detener captura</button>
+      <button type="button" className="secondary" disabled={running || checking || !!working || !installed}
+        onClick={() => void command('probe')}>Comprobar directo</button>
+      <button type="button" className="secondary" disabled={!selectedQuality || !installed || running || atLimit || checking || !!working || capture.saving || connection === 'offline'}
+        onClick={() => void command('start')}><Radio size={16}/>Iniciar captura</button>
+      <button type="button" className="secondary" disabled={!running || capture.state === 'stopping' || !!working}
+        onClick={() => void command('stop')}><Square size={14}/>Detener captura</button>
     </div>
     <dl className="live-capture-metrics">
-      <div><dt>Tiempo de captura</dt><dd>{seconds(status?.elapsed ?? 0)}</dd></div>
-      <div><dt>Disponible en el búfer</dt><dd>{seconds(status?.buffer_seconds ?? 0)}</dd></div>
+      <div><dt>Tiempo de captura</dt><dd>{seconds(capture.elapsed)}</dd></div>
+      <div><dt>Disponible en el búfer</dt><dd>{seconds(capture.buffer_ready === false ? 0 : capture.buffer_seconds)}</dd></div>
+      <div><dt>Búfer en disco</dt><dd>{sizeLabel(capture.bytes)} / {sizeLabel(capture.max_bytes)}</dd></div>
     </dl>
-    {status?.installed === false && <p className="live-note">Instala Streamlink para habilitar la captura directa.
-      {' '}<code>.\.venv\Scripts\python.exe -m pip install -r backend/requirements-live.txt</code>
-    </p>}
-    {message && <p className={error ? 'live-error' : 'live-note'} role={error ? 'alert' : 'status'}>{message}</p>}
-  </>;
+    <div className="live-capture-options">
+      <label>Guardar los últimos<select value={entry.seconds} disabled={!!working || saving}
+        onChange={event => void command('settings', { seconds: Number(event.target.value) as DirectLength })}>
+        {directLengths.map(value => <option value={value} key={value}>{value} s</option>)}
+      </select></label>
+      <button type="button" className="primary" disabled={!canSave} onClick={() => void onSave()}>
+        {saving ? <LoaderCircle className="spin" size={16}/> : <HardDrive size={16}/>}
+        {saving ? 'Guardando e importando…' : 'Guardar fragmento'}
+      </button>
+      <button type="button" className="secondary" aria-pressed={selected} onClick={onSelect}>AutoClipping y atajo</button>
+    </div>
+    {(error || capture.message) && <p className={error || capture.state === 'error' ? 'live-error' : 'live-note'}
+      role={error || capture.state === 'error' ? 'alert' : 'status'}>{error || capture.message}</p>}
+  </article>;
 }
-

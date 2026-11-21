@@ -70,7 +70,7 @@ export function AnalysisPanel({ video, output, onChoose, onExported, renderBlock
     let alive = true;
     const poll = async () => {
       try {
-        const list = await request<Analysis[]>(`/videos/${video.id}/analyses`);
+        const list = (await request<Analysis[]>(`/videos/${video.id}/analyses`)).filter(item => !item.options.transcript_window);
         if (alive) {
           setAnalyses(list);
           setAnalysisId(previous => list.some(a => a.id === previous) ? previous : list[0]?.id || '');

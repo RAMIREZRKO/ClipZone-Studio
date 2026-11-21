@@ -93,9 +93,10 @@ test('gráficos y plantillas aplican los números confirmados y conservan un fin
   await page.goto('/');
   const panel = page.getByRole('region', { name: 'Gráficos y plantillas' });
   await panel.getByRole('button', { name: 'Agregar texto' }).click();
-  const opacity = panel.getByLabel('Opacidad (%)');
+  const opacity = panel.getByLabel('Opacidad del texto (%)');
   await typeValue(opacity, '45');
   await opacity.press('Tab');
+  await panel.getByText('Tiempos avanzados', { exact: true }).click();
   const start = panel.getByLabel('Aparece (s)', { exact: true });
   await typeValue(start, '0,75');
   await start.press('Enter');
@@ -118,5 +119,5 @@ test('gráficos y plantillas aplican los números confirmados y conservan un fin
   await typeValue(opacity, '10');
   await opacity.press('Enter');
   await panel.getByRole('button', { name: 'Aplicar plantilla' }).click();
-  await expect(panel.getByLabel('Opacidad (%)')).toHaveValue('45');
+  await expect(panel.getByLabel('Opacidad del texto (%)')).toHaveValue('45');
 });

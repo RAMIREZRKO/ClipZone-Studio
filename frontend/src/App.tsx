@@ -16,7 +16,7 @@ import { LivePanel, type LiveDestination } from './components/LivePanel';
 import { defaultSplitLayout, normalizeSplitLayout, SplitCanvas, SplitControls, SplitRegionEditor } from './components/SplitFraming';
 import { emptyGameplay, splitGeometry } from './splitFramingGeometry';
 
-import { RemoveButton, RemoveDialog, SelectionBar, StoragePanel, type RemovalTarget } from './components/StoragePanel';
+import { DiskWarning, RemoveButton, RemoveDialog, SelectionBar, StoragePanel, type RemovalTarget } from './components/StoragePanel';
 
 type View = 'editor' | 'library' | 'exports' | 'storage' | 'live';
 const viewNames: Record<View, string> = { editor: 'Editor de clips', library: 'Mis vídeos', exports: 'Exportaciones', storage: 'Almacenamiento', live: 'ClipZone Live' };
@@ -361,36 +361,40 @@ export default function App() {
   return <div className="app-shell">
     <input ref={input} type="file" className="sr-only" aria-label="Seleccionar vídeo" accept=".mp4,.mov,.mkv,.webm,.avi,.m4v,.mts,.m2ts" onChange={e => void importFile(e.target.files?.[0])}/>
     <aside className="sidebar">
-      <a className="brand" href="#" onClick={e => { e.preventDefault(); setView('editor'); }}><div className="brand-mark"><Scissors size={23}/></div><span>clipzone<span className="brand-sub">STUDIO</span></span></a>
-      <button className="primary sidebar-import" onClick={() => input.current?.click()} disabled={uploading !== null}><Plus size={18}/>Importar vídeo</button>
-      <span className="nav-label">ESPACIO DE TRABAJO</span>
-      <nav aria-label="Principal">
-        <button className={`nav-item ${view === 'editor' ? 'selected' : ''}`} onClick={() => setView('editor')} title="Editor de clips"><Clapperboard size={18}/>Editor de clips<ChevronRight size={14} className="nav-chevron"/></button>
-        <button className={`nav-item ${view === 'live' ? 'selected' : ''}`} onClick={() => setView('live')} title="ClipZone Live"><Radio size={18}/>ClipZone Live</button>
-        <button className={`nav-item ${view === 'library' ? 'selected' : ''}`} onClick={() => setView('library')} title="Mis vídeos"><FolderOpen size={18}/>Mis vídeos<span className="count">{videos.length}</span></button>
-        <button className={`nav-item ${view === 'exports' ? 'selected' : ''}`} onClick={() => setView('exports')} title="Exportaciones"><ArrowDownToLine size={18}/>Exportaciones{active.length > 0 ? <span className="activity-dot"/> : <span className="count">{exports.length}</span>}</button>
-        <button title="Almacenamiento" className={`nav-item ${view === 'storage' ? 'selected' : ''}`} onClick={() => setView('storage')}><HardDrive size={18}/>Almacenamiento</button>
-      </nav>
-      <div className="nav-divider"/><span className="nav-label">INTELIGENCIA LOCAL</span>
-      <button className="nav-item ai-nav" onClick={() => { setView('editor'); window.setTimeout(() => document.getElementById('ai-moments')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 40); }}><WandSparkles size={18}/>Momentos con IA<span className="tiny-tag">F2</span></button>
-      <button className="nav-item ai-nav" title="Subtítulos dinámicos" onClick={() => {
-        setView('editor');
-        window.setTimeout(() => document.getElementById('captions-editor')?.scrollIntoView({ behavior: 'smooth' }), 40);
-      }}><Frame size={18}/>Subtítulos dinámicos</button>
-      <button className="nav-item ai-nav" title="Gráficos y plantillas" onClick={() => {
-        setView('editor');
-        window.setTimeout(() => document.getElementById('campaign-editor')?.scrollIntoView({ behavior: 'smooth' }), 40);
-      }}><LayoutGrid size={18}/>Gráficos y plantillas</button>
-      <div className="sidebar-bottom"><div className="local-card"><div className="local-card-icon"><ShieldCheck size={18}/><span>Tu equipo. Tus archivos.</span></div><p>Procesamiento local.<br/>Sin suscripciones.</p><div className="local-line"><span className="activity-dot"/> MODO LOCAL</div></div>
-        <button className="nav-item help-button" onClick={() => setHelp(true)}><CircleHelp size={18}/>Guía de inicio<ArrowRight size={14}/></button>
-        <div className="profile"><div className="avatar">CZ</div><div><strong>Mi espacio local</strong><span>ClipZone Studio · v{health?.version ?? '0.3.0'}</span></div><Monitor size={16}/></div>
+      <div className="sidebar-scroll">
+        <a className="brand" href="#" aria-label="ClipZone Studio" onClick={e => { e.preventDefault(); setView('editor'); }}><div className="brand-mark"><Scissors size={23}/></div><span>clipzone<span className="brand-sub">STUDIO</span></span></a>
+        <button className="primary sidebar-import" title="Importar vídeo" onClick={() => input.current?.click()} disabled={uploading !== null}><Plus size={18}/>Importar vídeo</button>
+        <span className="nav-label">ESPACIO DE TRABAJO</span>
+        <nav aria-label="Principal">
+          <button className={`nav-item ${view === 'editor' ? 'selected' : ''}`} onClick={() => setView('editor')} title="Editor de clips"><Clapperboard size={18}/>Editor de clips<ChevronRight size={14} className="nav-chevron"/></button>
+          <button className={`nav-item ${view === 'live' ? 'selected' : ''}`} onClick={() => setView('live')} title="ClipZone Live"><Radio size={18}/>ClipZone Live</button>
+          <button className={`nav-item ${view === 'library' ? 'selected' : ''}`} onClick={() => setView('library')} title="Mis vídeos"><FolderOpen size={18}/>Mis vídeos<span className="count">{videos.length}</span></button>
+          <button className={`nav-item ${view === 'exports' ? 'selected' : ''}`} onClick={() => setView('exports')} title="Exportaciones"><ArrowDownToLine size={18}/>Exportaciones{active.length > 0 ? <span className="activity-dot"/> : <span className="count">{exports.length}</span>}</button>
+          <button title="Almacenamiento" className={`nav-item ${view === 'storage' ? 'selected' : ''}`} onClick={() => setView('storage')}><HardDrive size={18}/>Almacenamiento</button>
+        </nav>
+        <div className="nav-divider"/><span className="nav-label">INTELIGENCIA LOCAL</span>
+        <button className="nav-item ai-nav" onClick={() => { setView('editor'); window.setTimeout(() => document.getElementById('ai-moments')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 40); }}><WandSparkles size={18}/>Momentos con IA<span className="tiny-tag">F2</span></button>
+        <button className="nav-item ai-nav" title="Subtítulos dinámicos" onClick={() => {
+          setView('editor');
+          window.setTimeout(() => document.getElementById('captions-editor')?.scrollIntoView({ behavior: 'smooth' }), 40);
+        }}><Frame size={18}/>Subtítulos dinámicos</button>
+        <button className="nav-item ai-nav" title="Gráficos y plantillas" onClick={() => {
+          setView('editor');
+          window.setTimeout(() => document.getElementById('campaign-editor')?.scrollIntoView({ behavior: 'smooth' }), 40);
+        }}><LayoutGrid size={18}/>Gráficos y plantillas</button>
+        <div className="sidebar-bottom">
+          <div className="local-card"><div className="local-card-icon"><ShieldCheck size={18}/><span>Tu equipo. Tus archivos.</span></div><p>Procesamiento local.<br/>Sin suscripciones.</p><div className="local-line"><span className="activity-dot"/> MODO LOCAL</div></div>
+          <button className="nav-item help-button" onClick={() => setHelp(true)}><CircleHelp size={18}/>Guía de inicio<ArrowRight size={14}/></button>
+        </div>
       </div>
+      <div className="profile"><div className="avatar">CZ</div><div><strong>Mi espacio local</strong><span>ClipZone Studio{health ? ` · v${health.version}` : ''}</span></div><Monitor size={16}/></div>
     </aside>
     <div className="workspace">
       <header className="topbar"><div className="breadcrumbs"><LayoutGrid size={16}/><span>Mi espacio</span><ChevronRight size={13}/><strong>{viewNames[view]}</strong></div><div className="topbar-right"><span className="version-tag">FASE 03</span><span className={`server-status ${health?.status === 'ok' ? 'online' : ''}`}><i/>{health?.status === 'ok' ? 'Motor local listo' : health ? 'Faltan dependencias' : 'Sin conexión'}</span></div></header>
       <main onDragOver={e => { e.preventDefault(); if (e.dataTransfer.types.includes('Files')) setDragging(true); }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false); }} onDrop={e => { e.preventDefault(); setDragging(false); void importFile(e.dataTransfer.files[0]); }}>
         {dragging && <div className="drop-overlay"><Upload size={40}/><h2>Suelta tu próximo gran vídeo</h2><span>Se procesará en este equipo</span></div>}
         <div className="page-heading"><div>{pageCopy[view].eyebrow && <div className="eyebrow"><span/>{pageCopy[view].eyebrow}</div>}<h1>{pageCopy[view].heading}</h1><p>{pageCopy[view].description}</p></div><div className="heading-action">{view === 'editor' ? <><div className="step done"><span>01</span>Importa</div><div className="step-line"/><div className={`step ${selected ? 'done' : ''}`}><span>02</span>Edita</div><div className="step-line"/><div className="step"><span>03</span>Exporta</div></> : <button className="secondary" onClick={() => setView('editor')}><ArrowLeft size={16}/>Volver al editor</button>}</div></div>
+        {view !== 'storage' && health?.storage && <DiskWarning space={health.storage}/>}
         {error && <div className="alert error" role="alert"><CircleHelp size={17}/><span>{error}</span><button onClick={() => setError('')} aria-label="Cerrar error"><X size={16}/></button></div>}
         {notice && <div className="toast" role="status"><CheckCheck size={17}/>{notice}<button onClick={() => setNotice('')} aria-label="Cerrar aviso"><X size={15}/></button></div>}
         {health && health.status !== 'ok' && <div className="alert warning"><Settings2 size={17}/><span>Falta FFmpeg o FFprobe. Ejecuta <code>scripts/setup.ps1 -DownloadFFmpeg</code> y reinicia el servidor.</span></div>}
@@ -447,8 +451,11 @@ export default function App() {
                       </> : <span>{selected.preview_status === 'processing' ? 'Preparando vídeo…' : 'El archivo de vista previa no está disponible.'}</span>}
                     </div>}
                     {monitor === 'live' && current >= start && current < end && graphics.length > 0 &&
-                      <GraphicOverlay layers={graphics} time={current - start} ratio={displayRatio} selected={activeGraphic}
-                        select={setActiveGraphic} move={(id, x, y) => setGraphics(previous => previous.map(layer => layer.id === id ? { ...layer, x, y } : layer))}/>}
+                      <GraphicOverlay layers={graphics} time={current - start} ratio={displayRatio} format={ratio} resolution={resolution} canvasWidth={outputWidth}
+                        seam={splitPlan ? (splitPreview.inverted ? splitPlan.gameplay.height : splitPlan.camera.height) * 100 / outputHeight : null}
+                        selected={activeGraphic} select={setActiveGraphic}
+                        move={(id, x, y) => setGraphics(previous => previous.map(layer => layer.id === id
+                          ? { ...layer, x, y, ...(layer.hook ? { anchor: 'free' as const } : {}) } : layer))}/>}
                     {monitor === 'live' && sourceUrl && captionsEnabled && captionTrack && <CaptionOverlay segments={captionTrack.segments}
                       time={current} playing={playing} style={captionStyle} language={captionLanguage} ratio={ratio} resolution={resolution} safeTop={safeTop} safeBottom={safeBottom}
                       splitLayout={fit === 'split' ? (splitPreview.camera_share === splitLayout.camera_share ? splitLayout : splitPreview) : null}
@@ -502,6 +509,7 @@ export default function App() {
 </div>
           </div>
           <SubtitlesPanel key={selectedId ?? 'empty'} video={selected} track={captionTrack} dirty={!!captionState?.dirty}
+            clipStart={start} clipEnd={end}
             enabled={captionsEnabled} setEnabled={setCaptionsEnabled} time={current} sidecars={captionSidecars} setSidecars={setCaptionSidecars}
             style={captionStyle} setStyle={setCaptionStyle} splitFraming={fit === 'split'} language={captionLanguage} setLanguage={setCaptionLanguage} onTrack={saveTrack} onSeek={seekInEditor}
             setSegments={update => {
@@ -514,7 +522,7 @@ export default function App() {
           <CampaignPanel layers={graphics} options={{
             ...renderOptions,
             captions: needsCaptionTrack ? { enabled: captionsEnabled, sidecars: captionSidecars, language: captionLanguage, style: captionStyle, revision: null } : null,
-          }} onLayers={setGraphics} onApply={applyComposition} duration={end - start}
+          }} onLayers={setGraphics} onApply={applyComposition} duration={end - start} videoId={selected?.id} start={start} end={end} title={title}
             onSelect={(id, time) => { setActiveGraphic(id); seekInEditor(Math.min(end - .001, start + time)); }}/>
           <AnalysisPanel video={selected} output={renderOptions} renderBlocked={captionRenderBlocked}
             onChoose={moment => { setMonitor('live'); player.current?.pause(); setPlaying(false); setStart(moment.start); setEnd(moment.end); setTitle(moment.title.slice(0, 100)); if (!exact) seek(moment.start); else setCurrent(moment.start); document.querySelector('.preview-panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }}
@@ -537,7 +545,7 @@ export default function App() {
           </article>) : <div className="empty-page panel"><FolderOpen size={36}/><h2>Mis vídeos</h2><p>Importa un vídeo para empezar.</p>
             <button className="primary" onClick={() => input.current?.click()}><Plus size={16}/>Importar vídeo</button></div>}</section>
         </>}
-        {view === 'storage' && <StoragePanel onCleaned={() => void refresh().catch(e => setError((e as Error).message))}/>}
+        {view === 'storage' && <StoragePanel space={health?.storage} onCleaned={() => void refresh().catch(e => setError((e as Error).message))}/>}
         {view === 'exports' && <section className="exports-list"><div className="list-heading"><h2>Cola de exportación <span>{exports.length}</span></h2><span><span className="activity-dot"/>{active.length ? `${active.length} en proceso · uno a la vez` : 'Todo al día'}</span></div>
           {removableExports.length > 0 && <SelectionBar count={markedExports.length} all={markedExports.length === removableExports.length}
             onAll={() => setSelectedExports(markedExports.length === removableExports.length ? [] : removableExports.map(j => j.id))}

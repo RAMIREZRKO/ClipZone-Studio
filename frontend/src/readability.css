@@ -7,6 +7,45 @@
 }
 
 h1 { font-size: clamp(28px, 2.3vw, 32px); }
+.sidebar {
+  inset-block-end: auto;
+  block-size: 100vh;
+  block-size: 100dvh;
+}
+.sidebar-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-block-size: 0;
+  margin-inline: -8px;
+  padding: 3px 8px;
+  overflow: hidden auto;
+  overscroll-behavior-y: contain;
+  scroll-padding-block: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #50664a transparent;
+}
+.sidebar-scroll > *, .sidebar > .profile { flex-shrink: 0; }
+.sidebar > .profile > .avatar { flex: 0 0 29px; }
+@media (max-height: 1000px) {
+  .sidebar .brand { margin-bottom: 22px; }
+  .sidebar-import { margin-bottom: 18px; }
+  .sidebar .nav-divider { margin-block: 13px; }
+  .sidebar-bottom { padding-top: 16px; }
+  .sidebar > .profile { margin-top: 8px; padding-block: 10px 12px; }
+}
+@media (max-width: 920px) {
+  .sidebar .sidebar-import { font-size: 0; }
+  .sidebar > .profile {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-inline: -4px;
+    padding-block: 8px 9px;
+    text-align: center;
+  }
+  .sidebar > .profile > svg, .sidebar > .profile span { display: none; }
+}
 .panel-heading h2, .list-heading h2, .source-strip h2, .moments-toolbar h3 { font-size: 17px; }
 .page-heading p, .empty-stage p, .analysis-controls > p, .moment-excerpt, .transcript button,
 .help-content p, .roadmap p, .export-card p, .video-card p, .analysis-empty p {
@@ -263,3 +302,13 @@ h1 { font-size: clamp(28px, 2.3vw, 32px); }
   .export-card-actions { flex-wrap: wrap; }
   .export-card-actions .primary, .export-card-actions .secondary { font-size: 12px; }
 }
+.storage-location { padding: 16px 20px 0; display: flex; align-items: start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.storage-location p, .storage-picker p { overflow-wrap: anywhere; }
+.storage-location-note { flex: 1 0 100%; }
+.disk-space:empty { display: none; }
+.storage-picker { display: grid; gap: 12px; }
+.storage-picker label { display: grid; gap: 6px; }
+.storage-picker input { width: 100%; }
+.storage-folders { display: flex; flex-wrap: wrap; gap: 8px; max-height: 180px; overflow: auto; }
+.storage-folders p { flex: 1 0 100%; }
+.storage-folders .text-button { padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; }

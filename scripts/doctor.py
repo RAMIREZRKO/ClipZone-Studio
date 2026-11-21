@@ -16,7 +16,7 @@ def main() -> int:
     settings = Settings()
     okay = True
     print(f"Python {sys.version.split()[0]} | {sys.executable}")
-    for name in ("fastapi", "uvicorn", "pydantic", "multipart"):
+    for name in ("fastapi", "uvicorn", "pydantic", "multipart", "PIL"):
         found = importlib.util.find_spec(name) is not None
         print(f"[{'OK' if found else 'FALTA'}] {name}")
         okay &= found

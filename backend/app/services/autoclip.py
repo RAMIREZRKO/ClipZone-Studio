@@ -1,28 +1,29 @@
 """AutoClipping local sobre el búfer directo. La API de OBS sigue siendo manual."""
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from importlib.util import find_spec
 import logging
 import os
 from pathlib import Path
 from shutil import copyfile
-import sqlite3
 import subprocess
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, TemporaryFile
 from threading import Event, RLock, Thread
 from time import monotonic, time
-from typing import Literal
+from typing import Literal, get_args
 from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ..ai.live_detector import AudioSignal, LiveDetector, editorial_score
+from ..ai.live_detector import AudioSignal, DetectionMode, LiveDetector, editorial_score, has_speech_context
 from ..ai.models import capabilities
 from ..database import now
-from .analysis import AnalysisQueue
+from ..storage_location import GB
+from .analysis import AnalysisQueue, LiveWhisperError, LiveWhisperQueueTimeout
 from .direct_buffer import AUTO_PLAYLIST, SESSION_NAME, Segment, write_playlist
 from .direct_capture import MIN_FREE, CaptureSession, DirectCapture
 from .direct_source import terminate_tree
@@ -30,13 +31,21 @@ from .media import CREATE_NO_WINDOW, MediaError
 from .obs import LiveError
 
 logger = logging.getLogger("clipzone.autoclip")
-MAX_BYTES = 512 * 1024**2
+MIN_CANDIDATE_BYTES = 8 * 1024**2
+RETRY_DELAY = 8
+DEFERRED_LIMIT = 4
+DEFERRED_AGE = 65
 CAPTURE_STATES = {"capturing", "reconnecting"}
 
 
-class AutoOptions(BaseModel):
+class CandidateStorage(BaseModel):
+    limit_gb: Literal[1, 5, 10, 20]
+
+
+class AutoFields(BaseModel):
     enabled: bool = False
     model: Literal["tiny", "base", "small"] = "tiny"
+    detection_mode: DetectionMode = "mixed"
     duration: Literal[30, 60, 90] = 30
     sensitivity: Literal["low", "balanced", "high"] = "balanced"
     minimum_score: int = Field(default=58, ge=0, le=100)
@@ -45,10 +54,18 @@ class AutoOptions(BaseModel):
     per_hour: int = Field(default=6, ge=1, le=20)
     interval: int = Field(default=40, ge=5, le=600)
 
+    @field_validator("detection_mode", mode="before")
+    @classmethod
+    def legacy_mode(cls, value):
+        return "irl" if value == "reaction" else value
+
+
+class AutoOptions(AutoFields):
     @model_validator(mode="after")
     def timing(self):
         if self.before + self.after > self.duration:
             raise ValueError("La suma de los segundos anteriores y posteriores debe caber en la duración del clip.")
+        self.model = "tiny"
         return self
 
     def window(self, event: float) -> tuple[float, float]:
@@ -60,27 +77,66 @@ def overlap(first: tuple[float, float], second: tuple[float, float]) -> bool:
     return common > .4 * min(first[1] - first[0], second[1] - second[0])
 
 
+@dataclass(frozen=True)
+class CaptureCancellation:
+    config: Event
+    finished: Event
+
+    def is_set(self) -> bool:
+        return self.config.is_set() or self.finished.is_set()
+
+    def wait(self, seconds: float) -> bool:
+        return self.is_set() or self.finished.wait(seconds) or self.config.is_set()
+
+
+@dataclass(frozen=True)
+class Proposal:
+    session: CaptureSession
+    epoch: int
+    origin: str
+    signal: AudioSignal
+    options: AutoOptions
+    token: CaptureCancellation
+    span: tuple[float, float]
+    queued_at: float
+
+    @property
+    def strength(self):
+        if self.signal.kind == "conversation":
+            return .65 + self.signal.voice / 2
+        return self.signal.voice + self.signal.intensity / 2
+
+
 class AutoClip:
-    def __init__(self, direct: DirectCapture, analysis: AnalysisQueue):
+    def __init__(self, direct: DirectCapture, analysis: AnalysisQueue, shared: "AutoClip | None" = None):
         self.direct, self.analysis = direct, analysis
         self.library, self.media = direct.library, direct.media
         self.settings, self.db = direct.settings, direct.library.db
         self.root = self.settings.data_dir.resolve() / "autoclips"
-        self.lock, self.review_lock = RLock(), RLock()
+        self.lock = RLock()
+        self.review_lock = shared.review_lock if shared else RLock()
+        self.render_lock = shared.render_lock if shared else RLock()
+        self.pcm_lock = shared.pcm_lock if shared else RLock()
+        self.quota_lock = shared.quota_lock if shared else RLock()
         self.shutdown_event, self.wake, self.cancel = Event(), Event(), Event()
         self.options = AutoOptions()
         self.stage, self.message = "disabled", None
         self.detected = self.filtered = self.skipped = 0
-        self.last_detection = float("-inf")
+        self.last_attempt = float("-inf")
+        self.deferred: list[Proposal] = []
+        self.omissions: Counter[str] = Counter()
+        self.filters: Counter[str] = Counter()
+        self.audio_segments = self.audio_failures = self.transcriptions = self.generated = 0
+        self.last_score = self.best_score = None
+        self.last_error = None
         self.pending = None
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipzone-auto-candidate")
-        rows = self.db.list("autoclips")
-        self.saved = deque(sorted(datetime.fromisoformat(row["created_at"]).timestamp() for row in rows
-                                  if datetime.fromisoformat(row["created_at"]).timestamp() >= time() - 3600))
+        self.saved = deque()
+        self.saved_channel = None
         self.windows: deque[tuple[str, tuple[float, float]]] = deque(maxlen=80)
-        self.clean_files(rows)
-        self.monitor = Thread(target=self.run, name="clipzone-auto-listen", daemon=True)
-        self.monitor.start()
+        if not shared:
+            self.clean_files(self.db.list("autoclips"))
+        self.monitor: Thread | None = None
 
     def clean_files(self, rows: list[dict]) -> None:
         keep = {row["id"] for row in rows if row["status"] == "pending"}
@@ -106,15 +162,40 @@ class AutoClip:
                     continue
         return sum(sizes)
 
-    def status(self) -> dict:
-        caps = capabilities(self.settings)
+    def progress(self) -> dict:
         with self.lock:
             return {"options": self.options.model_dump(), "stage": self.stage, "message": self.message,
                     "detected": self.detected, "filtered": self.filtered, "skipped": self.skipped,
-                    "bytes": self.size(), "max_bytes": MAX_BYTES, "vad": find_spec("webrtcvad") is not None,
-                    "whisper": all(caps["dependencies"].values()), "models": caps["models"]}
+                    "diagnostics": {"audio_segments": self.audio_segments, "audio_failures": self.audio_failures,
+                                    "transcriptions": self.transcriptions, "generated": self.generated,
+                                    "deferred": len(self.deferred), "last_score": self.last_score,
+                                    "best_score": self.best_score, "last_error": self.last_error,
+                                    "omissions": dict(self.omissions), "filters": dict(self.filters)}}
 
-    def configure(self, options: AutoOptions) -> dict:
+    def resources(self) -> dict:
+        caps = capabilities(self.settings)
+        return {**self.storage(), "detection_modes": get_args(DetectionMode),
+                "vad": find_spec("webrtcvad") is not None,
+                "whisper": all(caps["dependencies"].values()), "models": caps["models"]}
+
+    def quota(self) -> CandidateStorage:
+        return CandidateStorage.model_validate(self.db.get("settings", "autoclip_storage") or {"limit_gb": 5})
+
+    def storage(self) -> dict:
+        maximum = self.quota().limit_gb
+        used = self.size()
+        return {"bytes": used, "max_bytes": maximum * GB, "available_bytes": max(0, maximum * GB - used),
+                "candidate_limit_gb": maximum}
+
+    def configure_storage(self, storage: CandidateStorage) -> dict:
+        with self.quota_lock:
+            self.db.put("settings", {"id": "autoclip_storage", **storage.model_dump()})
+            return self.storage()
+
+    def status(self) -> dict:
+        return {**self.progress(), **self.resources()}
+
+    def check_options(self, options: AutoOptions) -> None:
         if options.enabled:
             self.direct.engine.require()
             self.media.require("ffmpeg")
@@ -125,17 +206,28 @@ class AutoClip:
                 model["id"] == options.model and model["installed"] for model in caps["models"]
             ):
                 raise LiveError("auto_model", "Instala primero el modelo de Whisper elegido desde Momentos con IA.", 409)
+
+    def apply_options(self, options: AutoOptions) -> None:
         with self.lock:
             if self.options != options:
                 self.cancel.set()
                 self.cancel = Event()
                 self.options = options
+                self.deferred.clear()
+                self.last_attempt = float("-inf")
                 self.stage = "waiting" if options.enabled else "disabled"
                 self.message = None
                 self.wake.set()
+            if options.enabled and (self.monitor is None or not self.monitor.is_alive()):
+                self.monitor = Thread(target=self.run, name="clipzone-auto-listen", daemon=True)
+                self.monitor.start()
+
+    def configure(self, options: AutoOptions) -> dict:
+        self.check_options(options)
+        self.apply_options(options)
         return self.status()
 
-    def activity(self, token: Event, stage: str, message: str | None = None) -> None:
+    def activity(self, token: Event | CaptureCancellation, stage: str, message: str | None = None) -> None:
         with self.lock:
             if not token.is_set():
                 self.stage, self.message = stage, message
@@ -143,7 +235,7 @@ class AutoClip:
     def next_audio(self, previous: str | None) -> tuple[CaptureSession, int, Segment] | None:
         with self.direct.lock:
             session = self.direct.session
-            if not session or session.state not in CAPTURE_STATES or not session.buffer.closed:
+            if not session or session.finished.is_set() or session.state not in CAPTURE_STATES or not session.buffer.closed:
                 return None
             buffer = session.buffer
             closed = list(buffer.closed)
@@ -168,69 +260,163 @@ class AutoClip:
                 continue
             if current is not token:
                 token, identity, previous = current, None, None
-            picked = self.next_audio(previous)
+            try:
+                self.drain()
+                picked = self.next_audio(previous)
+            except Exception:
+                logger.exception("Falló la lectura del estado del búfer de AutoClipping.")
+                self.error(token, "No se pudo consultar el búfer directo.")
+                self.shutdown_event.wait(.5)
+                continue
             if picked is None:
                 with self.direct.lock:
                     session = self.direct.session
-                    inactive = not session or session.state not in CAPTURE_STATES or not session.buffer.closed
+                    finished = not session or session.finished.is_set() or session.state not in CAPTURE_STATES
+                    inactive = finished or not session.buffer.closed
                 if inactive and not idle:
                     with self.lock:
-                        if not self.pending and self.stage not in {"error", "waiting"}:
+                        if finished and not token.is_set():
+                            self.deferred.clear()
+                            self.activity(token, "waiting")
+                        elif not self.pending and self.stage not in {"error", "waiting"}:
                             self.activity(token, "waiting")
                     idle = True
                 self.shutdown_event.wait(.25)
                 continue
             idle = False
             session, epoch, segment = picked
+            cancellation = CaptureCancellation(token, session.finished)
             previous = str(segment.path)
             identity_now = (session.buffer.folder, epoch)
             try:
                 if identity != identity_now or abs(end - segment.start) > .8:
-                    detector = LiveDetector(options.sensitivity)
+                    detector = LiveDetector(options.sensitivity, options.detection_mode)
                     identity = identity_now
                 end = segment.start + segment.duration
-                data = self.pcm(["-i", str(segment.path)], duration=min(9, segment.duration))
+                data = self.pcm(["-i", str(segment.path)], duration=min(9, segment.duration), token=cancellation)
                 with self.lock:
+                    if data and not cancellation.is_set():
+                        self.audio_segments += 1
                     if not self.pending:
                         message = self.message if data and self.stage != "waiting" else None
-                        self.activity(token, "listening", message if data else "Esperando segmentos con audio.")
-                if data:
+                        self.activity(cancellation, "listening", message if data else "Esperando segmentos con audio.")
+                if data and not cancellation.is_set():
                     for signal in detector.feed(data, segment.start):
                         self.propose(session, epoch, signal, options, token)
-            except (OSError, ValueError, MediaError, ImportError, subprocess.SubprocessError):
-                self.activity(token, "error", "No se pudo leer el audio del búfer.")
-                logger.exception("Falló la lectura de audio de AutoClipping.")
+            except Exception as exc:
+                identity = None
+                with self.lock:
+                    if not cancellation.is_set():
+                        self.audio_failures += 1
+                        if self.stage != "error":
+                            logger.exception("Falló el audio de AutoClipping para %s:%s.",
+                                             session.source.platform, session.source.channel)
+                self.error(cancellation, str(exc) if isinstance(exc, MediaError) else "No se pudo leer el audio del búfer.")
             finally:
                 self.direct.release_segments(session, (segment,))
 
-    def pcm(self, inputs: list[str], duration: float, start=0., cwd=None) -> bytes:
-        result = subprocess.run([self.media.require("ffmpeg"), "-hide_banner", "-v", "error", "-nostdin",
-                                 "-protocol_whitelist", "file,pipe", *inputs, "-ss", f"{start:.6f}",
-                                 "-t", f"{duration:.6f}", "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
-                                 "-threads", "1", "-f", "s16le", "pipe:1"], cwd=cwd, capture_output=True,
-                                creationflags=CREATE_NO_WINDOW, timeout=12)
-        return result.stdout if result.returncode == 0 else b""
+    def pcm(self, inputs: list[str], duration: float, start=0., cwd=None, token: CaptureCancellation | None = None) -> bytes:
+        with self.pcm_lock:
+            if token is not None and token.is_set():
+                return b""
+            command = [self.media.require("ffmpeg"), "-hide_banner", "-v", "error", "-nostdin",
+                       "-protocol_whitelist", "file,pipe", *inputs, "-ss", f"{start:.6f}",
+                       "-t", f"{duration:.6f}", "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+                       "-threads", "1", "-f", "s16le", "pipe:1"]
+            deadline = monotonic() + 12
+            with subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  creationflags=CREATE_NO_WINDOW, start_new_session=os.name != "nt") as process:
+                try:
+                    while True:
+                        if token is not None and token.is_set():
+                            return b""
+                        try:
+                            audio, errors = process.communicate(timeout=.2)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if monotonic() >= deadline:
+                                raise
+                finally:
+                    terminate_tree(process)
+        if process.returncode:
+            details = errors.decode("utf-8", errors="replace").strip()
+            raise MediaError(f"FFmpeg no pudo extraer el audio: {details[-600:]}" if details else
+                             "FFmpeg no pudo extraer el audio del búfer.")
+        return audio
 
     def propose(self, session: CaptureSession, epoch: int, signal: AudioSignal, options: AutoOptions, token: Event) -> None:
         origin = f"{session.buffer.folder.name}:{epoch}"
         span = options.window(signal.time)
+        cancellation = CaptureCancellation(token, session.finished)
         with self.lock:
-            if token.is_set() or self.shutdown_event.is_set():
+            if cancellation.is_set() or self.shutdown_event.is_set():
                 return
             self.detected += 1
-            clock = monotonic()
-            while self.saved and self.saved[0] <= time() - 3600:
-                self.saved.popleft()
-            if (self.pending or clock - self.last_detection < options.interval or len(self.saved) >= options.per_hour or
-                    any(key == origin and overlap(previous, span) for key, previous in self.windows)):
-                self.skipped += 1
+            channel = (session.source.platform, session.source.channel)
+            if channel != self.saved_channel:
+                self.saved_channel = channel
+                self.last_attempt = float("-inf")
+                self.deferred.clear()
+                self.saved = deque(sorted(datetime.fromisoformat(row["created_at"]).timestamp()
+                    for row in self.db.list("autoclips") if (row.get("platform"), row.get("channel")) == channel))
+            proposal = Proposal(session, epoch, origin, signal, options, cancellation, span, monotonic())
+            if self.limit(proposal):
                 return
-            self.last_detection = clock
-            self.activity(token, "collecting")
-            self.pending = self.executor.submit(self.process, session, epoch, origin, signal, options, token, span)
+            # Conserva alternativas acústicas mientras se reúne el postroll o Whisper está ocupado.
+            same = [item for item in self.deferred if item.origin == origin and abs(item.signal.time - signal.time) < 3]
+            if same:
+                previous = same[0]
+                self.omit("nearby_signal")
+                if previous.strength >= proposal.strength:
+                    return
+                self.deferred.remove(previous)
+            self.deferred.append(proposal)
+            if len(self.deferred) > DEFERRED_LIMIT:
+                self.deferred.remove(min(self.deferred, key=lambda item: item.strength))
+                self.omit("backlog_limit")
+            self.drain()
+
+    def omit(self, code: str) -> None:
+        self.skipped += 1
+        self.omissions[code] += 1
+
+    def limit(self, proposal: Proposal) -> bool:
+        clock = time()
+        while self.saved and self.saved[0] <= clock - 3600:
+            self.saved.popleft()
+        if any(key == proposal.origin and overlap(previous, proposal.span) for key, previous in self.windows):
+            self.omit("overlap")
+        elif len(self.saved) >= proposal.options.per_hour:
+            self.omit("hour_limit")
+        elif self.saved and clock - self.saved[-1] < proposal.options.interval:
+            self.omit("saved_interval")
+        else:
+            return False
+        return True
+
+    def drain(self) -> None:
+        with self.lock:
+            clock = monotonic()
+            if self.pending is not None or clock - self.last_attempt < RETRY_DELAY or self.shutdown_event.is_set():
+                return
+            while self.deferred:
+                proposal = max(self.deferred, key=lambda item: item.strength)
+                self.deferred.remove(proposal)
+                if proposal.token.is_set():
+                    continue
+                if clock - proposal.queued_at > DEFERRED_AGE:
+                    self.omit("expired_signal")
+                    continue
+                if self.limit(proposal):
+                    continue
+                self.last_attempt = clock
+                self.activity(proposal.token, "collecting")
+                self.pending = self.executor.submit(self.process, proposal.session, proposal.epoch, proposal.origin,
+                                                    proposal.signal, proposal.options, proposal.token, proposal.span)
+                return
 
     def collect(self, session: CaptureSession, epoch: int, window: tuple[float, float], event: float,
-                options: AutoOptions, token: Event, held: dict[Path, Segment]) -> tuple[float, float] | None:
+                options: AutoOptions, token: CaptureCancellation, held: dict[Path, Segment]) -> tuple[float, float] | None:
         deadline = monotonic() + options.after + 18
         while not token.is_set() and monotonic() < deadline:
             with self.direct.lock:
@@ -244,7 +430,7 @@ class AutoClip:
                 new = [item for item in choices if item.path not in held]
                 # Deja margen al búfer circular y a un guardado manual paralelo.
                 if sum(item.path.stat().st_size for item in (*held.values(), *new)) > self.direct.max_bytes * .45:
-                    raise LiveError("auto_disk", "El candidato excede el margen reservado del búfer temporal.")
+                    raise LiveError("auto_buffer_budget", "El candidato excede el margen reservado del búfer temporal.")
                 for item in buffer.hold(new):
                     held[item.path] = item
                 if choices and choices[-1].start + choices[-1].duration >= window[1] - .025:
@@ -266,7 +452,7 @@ class AutoClip:
         try:
             span = self.collect(session, epoch, window, signal.time, options, token, held)
             if not span or token.is_set():
-                self.skip(token, "El búfer anterior o posterior no llegó a completarse.")
+                self.skip(token, "incomplete_buffer", "El búfer anterior o posterior no llegó a completarse.")
                 return
             segments = tuple(held.values())
             if any(item.path.resolve() != item.path for item in segments):
@@ -274,47 +460,77 @@ class AutoClip:
             write_playlist(playlist, segments)
             inputs = ["-f", "concat", "-safe", "1", "-i", playlist.name]
             audio_start = max(span[0], signal.time - 14)
+            if signal.kind == "conversation":
+                audio_start = max(span[0], min(signal.time - 12, span[1] - 24))
             audio_end = min(span[1], audio_start + 24)
-            self.activity(token, "transcribing")
-            sound = self.pcm(inputs, audio_end - audio_start, audio_start - segments[0].start, folder)
+            sound = self.pcm(inputs, audio_end - audio_start, audio_start - segments[0].start, folder, token)
             if not sound:
-                self.skip(token, "El candidato no contiene audio utilizable.")
+                self.skip(token, "no_audio", "El candidato no contiene audio utilizable.")
                 return
-            with TemporaryDirectory(prefix="clipzone-auto-") as temp:
-                audio, result = Path(temp) / "event.pcm", Path(temp) / "event.json"
-                audio.write_bytes(sound)
-                transcript = self.analysis.transcribe_live(audio, options.model, result, token)
+            transcript = {"words": []}
+            if signal.kind in {"reaction", "conversation"} or signal.voice >= .45 or has_speech_context(sound):
+                self.activity(token, "waiting_whisper")
+                with TemporaryDirectory(prefix="clipzone-auto-") as temp:
+                    audio, result = Path(temp) / "event.pcm", Path(temp) / "event.json"
+                    audio.write_bytes(sound)
+                    transcript = self.analysis.transcribe_live(audio, options.model, result, token,
+                                                               on_start=lambda: self.activity(token, "transcribing"))
+                with self.lock:
+                    if transcript is not None and not token.is_set():
+                        self.transcriptions += 1
             if transcript is None:
-                self.skip(token, "Whisper está ocupado o se canceló el análisis.")
+                self.skip(token, "whisper_cancelled", "El análisis del candidato se canceló.")
                 return
-            editorial = editorial_score(transcript, signal.time - audio_start, signal)
-            if not editorial or editorial["score"] < options.minimum_score:
+            editorial = editorial_score(transcript, signal.time - audio_start, signal, options.detection_mode)
+            filters = editorial.pop("filters")
+            with self.lock:
+                if not token.is_set():
+                    self.last_score = editorial["score"]
+                    self.best_score = max(self.best_score or 0, self.last_score)
+            if not editorial["score"] or editorial["score"] < options.minimum_score:
                 with self.lock:
                     if not token.is_set():
                         self.filtered += 1
-                self.activity(token, "listening", "Candidato bajo el umbral o sin contexto transcrito suficiente.")
+                        self.filters.update(filters or ("under_threshold",))
+                self.activity(token, "listening", f"Candidato filtrado ({editorial['score']}/100). {editorial['reason']}.")
                 return
             if token.is_set():
                 return
             self.activity(token, "saving")
             movie = self.root / f"{candidate_id}.mp4"
-            info = self.render(inputs, folder, movie, span[0] - segments[0].start, span[1] - span[0], token)
-            with self.lock:
-                if not info or token.is_set():
+            with self.render_lock:
+                if token.is_set():
                     return
-                row = {**editorial, "id": candidate_id, "status": "pending", "created_at": now(),
-                       "duration": info["duration"], "size": movie.stat().st_size, "model": options.model,
-                       "platform": session.source.platform, "channel": session.source.channel, "quality": session.quality,
-                       "requested_seconds": options.duration, "video_id": None}
-                self.db.put("autoclips", row)
-                committed = True
-                self.saved.append(time())
-                self.windows.append((origin, span))
+                info = self.render(inputs, folder, movie, span[0] - segments[0].start, span[1] - span[0], token)
+                with self.quota_lock, self.lock:
+                    if not info or token.is_set():
+                        return
+                    if self.size() > self.quota().limit_gb * GB:
+                        raise LiveError("auto_disk", "La cuota de candidatos está llena. Revisa los candidatos guardados.")
+                    row = {**editorial, "id": candidate_id, "status": "pending", "created_at": now(),
+                           "duration": info["duration"], "size": movie.stat().st_size, "model": options.model,
+                           "platform": session.source.platform, "channel": session.source.channel, "quality": session.quality,
+                           **({"channel_name": session.source.name} if session.source.name else {}),
+                           "requested_seconds": options.duration, "video_id": None}
+                    self.db.put("autoclips", row)
+                    committed = True
+                    self.saved.append(time())
+                    self.windows.append((origin, span))
+                    self.generated += 1
             self.activity(token, "listening", "Candidato guardado para revisión.")
-        except (LiveError, MediaError, OSError, RuntimeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
-            logger.warning("Falló un candidato de AutoClipping", exc_info=True)
-            message = str(exc) if isinstance(exc, (LiveError, MediaError, RuntimeError)) else "No se pudo completar el candidato."
-            self.activity(token, "error", message)
+        except LiveWhisperQueueTimeout as exc:
+            self.skip(token, "whisper_queue_timeout", str(exc))
+        except Exception as exc:
+            expected = {"auto_disk": "candidate_storage", "auto_buffer_budget": "buffer_budget",
+                        "auto_incomplete": "incomplete_render"}
+            if not token.is_set() and isinstance(exc, LiveError) and exc.code in expected:
+                logger.warning("Candidato omitido de %s:%s (%s): %s",
+                               session.source.platform, session.source.channel, exc.code, exc)
+                self.skip(token, expected[exc.code], str(exc))
+            elif not token.is_set():
+                logger.exception("Falló un candidato de AutoClipping para %s:%s.", session.source.platform, session.source.channel)
+                message = str(exc) if isinstance(exc, (LiveError, MediaError, LiveWhisperError)) else "No se pudo completar el candidato. Consulta el registro del servidor."
+                self.error(token, message)
         finally:
             self.remove_file(playlist)
             if not committed:
@@ -323,16 +539,22 @@ class AutoClip:
             with self.lock:
                 self.pending = None
 
-    def skip(self, token: Event, message: str) -> None:
+    def error(self, token: Event | CaptureCancellation, message: str) -> None:
         with self.lock:
             if not token.is_set():
-                self.skipped += 1
+                self.last_error = message
+                self.activity(token, "error", message)
+
+    def skip(self, token: CaptureCancellation, code: str, message: str) -> None:
+        with self.lock:
+            if not token.is_set():
+                self.omit(code)
                 self.activity(token, "skipped", message)
 
-    def render(self, inputs, folder, movie, start, duration, token: Event) -> dict | None:
-        budget = min(MAX_BYTES - self.size(), (self.direct.disk_free() or 0) - MIN_FREE) - 1024**2
-        if budget < 8 * 1024**2:
-            raise LiveError("auto_disk", "Falta espacio para más candidatos. Conserva o descarta los pendientes.")
+    def render(self, inputs, folder, movie, start, duration, token: CaptureCancellation) -> dict | None:
+        budget = min(self.quota().limit_gb * GB - self.size(), (self.direct.disk_free() or 0) - MIN_FREE) - 1024**2
+        if budget < MIN_CANDIDATE_BYTES:
+            raise LiveError("auto_disk", "No hay espacio suficiente en el disco o en la cuota de candidatos de AutoClipping.")
         temporary = movie.with_suffix(".part")
         command = [self.media.require("ffmpeg"), "-hide_banner", "-v", "error", "-nostdin", "-y",
                    "-protocol_whitelist", "file,pipe", "-threads", "2", *inputs, "-ss", f"{start:.6f}",
@@ -341,9 +563,10 @@ class AutoClip:
                    "-crf", "21", "-maxrate", "8M", "-bufsize", "8M", "-pix_fmt", "yuv420p", "-c:a", "aac",
                    "-fs", str(budget), "-movflags", "+faststart", "-f", "mp4", str(temporary)]
         deadline = monotonic() + 105
-        with subprocess.Popen(command, cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
-                              start_new_session=os.name != "nt") as process:
+        with TemporaryFile(mode="w+b") as errors, subprocess.Popen(
+            command, cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=errors, creationflags=CREATE_NO_WINDOW, start_new_session=os.name != "nt",
+        ) as process:
             try:
                 while process.poll() is None:
                     if token.wait(.25):
@@ -351,7 +574,10 @@ class AutoClip:
                     if monotonic() > deadline:
                         raise MediaError("El render de AutoClipping tardó demasiado.")
                 if process.returncode:
-                    raise MediaError("No se pudo renderizar el candidato.")
+                    errors.seek(0, os.SEEK_END)
+                    errors.seek(max(0, errors.tell() - 1500))
+                    details = errors.read().decode("utf-8", errors="replace").strip()
+                    raise MediaError(f"No se pudo renderizar el candidato. {details}".strip())
             finally:
                 terminate_tree(process)
         info = self.media.probe(temporary)
@@ -391,7 +617,9 @@ class AutoClip:
                 with self.library.stage(".mp4") as staged:
                     copyfile(movie, staged.partial)
                     row = {**row, "status": "kept", "video_id": staged.id}
-                    live = {key: row[key] for key in ("platform", "quality", "requested_seconds")}
+                    live = {key: row[key] for key in ("platform", "channel", "quality", "requested_seconds")}
+                    if row.get("channel_name"):
+                        live["channel_name"] = row["channel_name"]
                     self.library.finish(staged, row["title"] + ".mp4",
                                         {**live, "method": "auto", "captured_at": row["created_at"]}, row)
             else:
@@ -404,7 +632,8 @@ class AutoClip:
             self.cancel.set()
             self.shutdown_event.set()
             self.wake.set()
-        self.monitor.join()
+        if self.monitor:
+            self.monitor.join()
         self.executor.shutdown(wait=True, cancel_futures=True)
 
 
@@ -417,16 +646,21 @@ def register_autoclip(app: FastAPI, public_video):
                 "thumbnail_url": f"{base}/thumbnail" if row["status"] == "pending" else None}
 
     @app.get("/api/live/auto/status")
-    def status():
-        return app.state.autoclip.status()
+    def status(slot: int = Query(0, ge=0, le=1), streamer: str | None = None):
+        return app.state.multistream.auto_status(streamer, slot)
 
     @app.post("/api/live/auto/config")
-    def configure(body: AutoOptions):
-        return app.state.autoclip.configure(body)
+    def configure(body: AutoFields, slot: int = Query(0, ge=0, le=1), streamer: str | None = None):
+        return app.state.multistream.configure_auto(body, streamer, slot)
+
+    @app.post("/api/live/auto/storage")
+    def configure_storage(body: CandidateStorage):
+        return app.state.autoclip.configure_storage(body)
 
     @app.get("/api/live/auto/candidates")
     def history():
-        return [public(row) for row in app.state.db.list("autoclips", limit=100)]
+        return [public(row) for index, row in enumerate(app.state.db.list("autoclips"))
+                if index < 100 or row["status"] == "pending"]
 
     @app.get("/api/live/auto/candidates/{identifier}/{kind}")
     def media(identifier: str, kind: Literal["preview", "thumbnail"]):

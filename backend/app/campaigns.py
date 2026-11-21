@@ -2,6 +2,7 @@
 from pathlib import Path
 import struct
 import subprocess
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, UploadFile
@@ -20,6 +21,7 @@ class TemplateRequest(BaseModel):
     id: Identifier | None = None
     name: str = Field(min_length=1, max_length=80)
     options: RenderOptions
+    kind: Literal["hook", "text"] | None = None
 
 
 def example(channel: str, text: str, call: str) -> dict:
@@ -116,6 +118,16 @@ def register_campaigns(app, settings):
         if not name:
             raise HTTPException(422, "La plantilla necesita un nombre.")
         options = body.options.model_dump(mode="json")
+        if body.kind:
+            if len(body.options.graphics) != 1 or body.options.graphics[0].kind != "text" or (
+                body.kind == "hook" and not body.options.graphics[0].hook
+            ):
+                raise HTTPException(422, "Selecciona una capa de texto para guardar su estilo.")
+            style = body.options.graphics[0].model_copy(update={
+                "text": "", "name": name, "auto_name": False, "start": 0, "end": None, "hidden": False,
+                "x": 50, "y": 23, "anchor": "free",
+            })
+            options = RenderOptions(graphics=[style]).model_dump(mode="json")
         if options["captions"]:
             options["captions"]["revision"] = None
         with app.state.export_lock:
@@ -125,6 +137,7 @@ def register_campaigns(app, settings):
                 if layer.kind == "image" and layer.asset_id:
                     asset_file(app.state.db, settings, layer.asset_id)
             return app.state.db.put("templates", {"id": body.id or uuid4().hex, "name": name, "example": False,
+                                                   **({"kind": body.kind} if body.kind else {}),
                                                    "options": options, "updated_at": now()})
 
     app.include_router(router)

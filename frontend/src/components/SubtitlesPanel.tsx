@@ -24,8 +24,10 @@ async function readSubtitleFile(file: File) {
   catch { return new TextDecoder('windows-1252').decode(buffer); }
 }
 
-export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, splitFraming, language, time, setEnabled, setSidecars, setStyle, setLanguage, setSegments, onTrack, onSeek }: {
+export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, splitFraming, language, time, clipStart, clipEnd,
+  setEnabled, setSidecars, setStyle, setLanguage, setSegments, onTrack, onSeek }: {
   video: Video | null; track: CaptionTrack | null; dirty: boolean; enabled: boolean; time: number;
+  clipStart: number; clipEnd: number;
   setEnabled: (enabled: boolean) => void; setSegments: Dispatch<SetStateAction<CaptionSegment[]>>;
   onTrack: (track: CaptionTrack) => void; onSeek: (time: number) => void;
   sidecars: boolean; setSidecars: (enabled: boolean) => void;
@@ -38,6 +40,7 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
   const [find, setFind] = useState('');
   const [replace, setReplace] = useState('');
   const [busy, setBusy] = useState(false);
+  const [smallJob, setSmallJob] = useState<string | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [confirm, setConfirm] = useState(false);
@@ -56,6 +59,13 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
         const complete = history.filter(item => item.status === 'completed');
         setAnalyses(complete);
         setAnalysisId(previous => complete.some(item => item.id === previous) ? previous : complete[0]?.id ?? '');
+        const job = history.find(item => item.id === smallJob);
+        if (job?.status === 'completed') {
+          setAnalysisId(job.id); setSmallJob(null);
+          setMessage('Transcripción Small disponible para generar la pista.');
+        } else if (job && (job.status === 'failed' || job.status === 'cancelled')) {
+          setSmallJob(null); setError(job.error ?? 'La retranscripción se canceló.');
+        }
       } catch (e) {
         if (!controller.signal.aborted) setError((e as Error).message);
       }
@@ -63,7 +73,20 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
     void refresh();
     const timer = window.setInterval(refresh, 3500);
     return () => { controller.abort(); window.clearInterval(timer); };
-  }, [video?.id]);
+  }, [video?.id, smallJob]);
+
+  async function retranscribe() {
+    if (!video || busy || smallJob) return;
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const job = await request<Analysis>(`/videos/${video.id}/analyses`, json({
+        model: 'small', transcript_window: [clipStart, clipEnd], reuse_transcript: false, cpu_threads: 2,
+      }));
+      setSmallJob(job.id);
+      setMessage('El clip seleccionado está en la cola de Whisper Small.');
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
 
   async function write(generate: boolean) {
     if (!video || !track || busy) return;
@@ -193,6 +216,8 @@ export function SubtitlesPanel({ video, track, dirty, enabled, sidecars, style, 
             {analyses.map(analysis => <option key={analysis.id} value={analysis.id}>{analysis.options.model} · {new Date(analysis.created_at).toLocaleString('es')}</option>)}
           </select></label>
           <button className="secondary" disabled={!analysisId || busy} onClick={() => segments.length ? setConfirm(true) : void write(true)}>Generar desde Whisper</button>
+          <button className="secondary" disabled={busy || !!smallJob || !video?.has_audio || clipEnd - clipStart < .1}
+            onClick={() => void retranscribe()}>Retranscribir clip con Whisper Small</button>
           <button className="secondary" disabled={busy} onClick={add}><Plus size={15}/> Añadir segmento</button>
         </div>
         {!analyses.length && <p className="field-note">Para generar la pista automáticamente, analiza primero el vídeo en <a href="#ai-moments">Momentos con IA</a>.</p>}

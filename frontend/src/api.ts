@@ -26,7 +26,8 @@ export interface Job {
   size: number | null; created_at: string;
   subtitles?: { srt: string; vtt: string };
 }
-export interface Health { status: string; dependencies: Record<string, boolean>; version: string; max_upload_bytes: number }
+export interface DiskSpace { free_bytes: number | null; disk_bytes: number | null; warning_bytes: number; capture_stop_bytes: number }
+export interface Health { status: string; dependencies: Record<string, boolean>; version: string; max_upload_bytes: number; storage?: DiskSpace }
 
 export interface AIModel {
   id: string; label: string; size_mb: number; installed: boolean;
@@ -37,7 +38,7 @@ export interface AICapabilities {
   dependencies: Record<string, boolean>; models: AIModel[]; ready: boolean; install_command: string;
   device: 'cpu'; downloads: Record<string, ModelDownload>;
 }
-export interface AnalysisOptions { model: string; language: string; min_duration: number; max_duration: number; max_clips: number; reuse_transcript: boolean; cpu_threads?: number }
+export interface AnalysisOptions { model: string; language: string; min_duration: number; max_duration: number; max_clips: number; reuse_transcript: boolean; cpu_threads?: number; transcript_window?: [number, number] | null }
 export interface Analysis {
   id: string; video_id: string; status: Job['status']; progress: number; stage: string; error: string | null;
   options: AnalysisOptions; created_at: string; reused_transcript: boolean;
@@ -66,12 +67,21 @@ export interface CaptionStyle {
   position_x?: number | null;
 }
 export interface CaptionOptions { enabled: boolean; sidecars: boolean; revision: string | null; language: string; style: CaptionStyle }
+export interface GraphicTextStyle {
+  bold: boolean; italic: boolean; underline: boolean; align: 'left' | 'center' | 'right';
+  background_color: string; background_transparent: boolean; background_opacity: number; padding: number; radius: number;
+  outline_color: string; outline_width: number;
+  shadow_color: string; shadow_opacity: number; shadow_blur: number; shadow_x: number; shadow_y: number;
+}
 export interface GraphicLayer {
   id: string; kind: 'image' | 'text'; name: string; asset_id: string | null; text: string; font: string; color: string;
   x: number; y: number; size: number; opacity: number; start: number; end: number | null;
+  hook?: boolean; anchor?: 'free' | 'split';
+  auto_name?: boolean; hidden?: boolean; text_style?: GraphicTextStyle | null;
 }
 export type RenderOptions = Pick<ClipSettings, 'ratio' | 'resolution' | 'fit' | 'platform' | 'safe_top' | 'safe_bottom' | 'focus_x' | 'focus_y' | 'blur_strength' | 'split_layout' | 'captions' | 'graphics'>;
-export interface CampaignTemplate { id: string; name: string; example: boolean; options: RenderOptions }
+export interface CampaignTemplate { id: string; name: string; example: boolean; kind?: 'hook' | 'text'; options: RenderOptions }
+export interface StreamerTemplate { id: string; url: string; template_id: string | null; name?: string }
 
 export async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`/api${url}`, options);

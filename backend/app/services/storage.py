@@ -4,23 +4,33 @@ import json
 import logging
 from pathlib import Path
 import re
+from shutil import disk_usage
 import sqlite3
 import stat
+from time import time
 from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from ..ai.model_files import MODEL_HASHES
+from ..storage_location import CAPTURE_STOP, DISK_WARN, DRAFT_LIMIT, LocationError, browse_folders
+from .live import check_obs_idle
 
 logger = logging.getLogger(__name__)
 ACTIVE = {"queued", "running"}
 ID = re.compile(r"[a-f0-9]{32}")
 FOLDERS = ("uploads", "previews", "thumbnails", "exports", "analysis", "drafts", "quarantine", "graphics")
+TEMP_AGE = 24 * 60 * 60
+DRAFT_AGE = 7 * TEMP_AGE
 
 
 class RemoveRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=100)
     remove_files: bool = False
+
+
+class LocationRequest(BaseModel):
+    directory: str | None = Field(max_length=2048)
 
 
 class Storage:
@@ -115,6 +125,75 @@ class Storage:
                 continue
         return total
 
+    def space(self) -> dict:
+        try:
+            capacity = disk_usage(self.root)
+            free, total = capacity.free, capacity.total
+        except OSError:
+            free, total = None, None
+        return {"directory": str(self.root), "free_bytes": free, "disk_bytes": total,
+                "warning_bytes": DISK_WARN, "capture_stop_bytes": CAPTURE_STOP}
+
+    def prune_drafts(self, busy: set[str], *, force: bool = False, reserve: int = 0) -> tuple[int, list[str], int]:
+        directory = self.root / "drafts"
+        if directory.resolve() != directory:
+            return 0, ["No se pudo acceder a la carpeta de vistas exactas."], DRAFT_LIMIT
+        entries = {}
+        for job in self.db.list("jobs"):
+            if job["kind"] == "draft":
+                entries[Path(job["output_path"]).stem] = job
+        drafts, errors = [], []
+        total = 0
+        for stem in set(entries) | {path.stem for path in directory.glob("*.mp4")}:
+            job = entries.get(stem)
+            if (job and (job["status"] in ACTIVE or job["id"] in busy)) or stem in busy:
+                continue
+            try:
+                path = self.path(job["output_path"] if job else directory / (stem + ".mp4"), "drafts")
+                info = path.stat() if path.exists() else None
+                stamp, size = (info.st_mtime, info.st_size) if info else (0, 0)
+                total += size
+                drafts.append((stamp, size, path, job))
+            except (OSError, ValueError):
+                errors.append("No se pudo consultar una vista exacta.")
+        removed = 0
+        cutoff = time() - DRAFT_AGE
+        for stamp, size, path, job in sorted(drafts, key=lambda item: item[0]):
+            if not force and stamp > cutoff and job and job["status"] == "completed" and total + reserve <= DRAFT_LIMIT:
+                continue
+            try:
+                warning = self.remove({"jobs": [job["id"]]} if job else {}, [path])
+                if warning:
+                    errors.append(warning)
+                removed += 1
+                total -= size
+            except (OSError, ValueError, sqlite3.Error):
+                errors.append("No se pudo limpiar una vista exacta.")
+        return removed, errors, total
+
+    def cleanup(self, processes: dict, analyses: set[str], uploads: set[str], *, force: bool = False):
+        removed, errors, _ = self.prune_drafts(set(processes), force=force)
+        for entry in self.db.list("removals"):
+            warning = self.finish(entry)
+            if warning:
+                errors.append(warning)
+        cutoff = time() - TEMP_AGE
+        for name, suffixes, busy in [("analysis", {".pcm", ".json"}, analyses), ("uploads", {".part"}, uploads)]:
+            folder = self.root / name
+            if folder.resolve() != folder:
+                continue
+            for path in folder.iterdir():
+                if path.suffix not in suffixes or path.stem in busy or not ID.fullmatch(path.stem):
+                    continue
+                try:
+                    candidate = self.path(path, name)
+                    if force or candidate.stat().st_mtime <= cutoff:
+                        candidate.unlink(missing_ok=True)
+                        removed += 1
+                except (OSError, ValueError):
+                    errors.append("No se pudo limpiar un archivo temporal.")
+        return removed, errors
+
     def stats(self) -> dict:
         sizes = {folder: self.file_sizes(folder) for folder in FOLDERS}
         database_bytes = 0
@@ -142,6 +221,8 @@ class Storage:
             "export_bytes": sizes["exports"],
             "transcript_bytes": transcripts_bytes,
             "temporary_bytes": sizes["analysis"] + sizes["drafts"] + sizes["quarantine"] + partial_bytes,
+            "draft_bytes": sizes["drafts"],
+            "draft_limit_bytes": DRAFT_LIMIT,
             "database_bytes": database_bytes,
             "model_bytes": model_bytes,
             "graphics_bytes": sizes["graphics"],
@@ -149,7 +230,15 @@ class Storage:
         }
 
 
-def register_storage(app):
+def cleanup_storage(state, *, force: bool = False):
+    with state.export_lock, state.queue.lock, state.analysis_queue.lock:
+        busy = set(state.analysis_queue.processes) | {
+            a["id"] for a in state.db.list("analyses") if a["status"] in ACTIVE
+        }
+        return state.storage.cleanup(state.queue.processes, busy, state.active_uploads, force=force)
+
+
+def register_storage(app, settings):
     router = APIRouter(prefix="/api", tags=["Almacenamiento"])
 
     @contextmanager
@@ -220,46 +309,46 @@ def register_storage(app):
 
     @router.get("/storage")
     def stats():
-        return app.state.storage.stats()
+        return {**app.state.storage.stats(), **app.state.storage.space(), **location_status()}
+
+    def location_status():
+        saved = settings.location.read()
+        return {"location_configurable": settings.location_file is not None, "pending_directory": saved.get("pending"),
+                "migration_error": saved.get("error"), "migration_warning": saved.get("warning"),
+                "verified_files": saved.get("verified_files")}
+
+    @router.post("/storage/location")
+    def change_location(body: LocationRequest):
+        state = app.state
+        if not settings.location_file:
+            raise HTTPException(409, "La ubicación está fijada por CLIPZONE_DATA_DIR.")
+        with state.multistream.lock, state.export_lock:
+            if body.directory is not None:
+                if state.live.lock.locked() or any(direct.is_active() or direct.saving or auto.pending
+                                                  for _, (direct, auto) in state.multistream.entries()):
+                    raise HTTPException(409, "Detén las capturas y espera a que termine cualquier guardado antes de cambiar la carpeta.")
+                try:
+                    check_obs_idle(settings)
+                except (ValueError, OSError) as exc:
+                    raise HTTPException(409, str(exc)) from exc
+            try:
+                settings.location.schedule(body.directory)
+            except (LocationError, OSError) as exc:
+                raise HTTPException(422, str(exc)) from exc
+        return location_status()
+
+    @router.get("/storage/folders")
+    def folders(directory: str | None = Query(None, max_length=2048)):
+        if not settings.location_file:
+            raise HTTPException(409, "La ubicación está fijada por CLIPZONE_DATA_DIR.")
+        try:
+            return browse_folders(directory)
+        except (LocationError, OSError) as exc:
+            raise HTTPException(422, "No se puede abrir esa carpeta local.") from exc
 
     @router.post("/storage/cleanup")
     def clean():
-        removed, errors = 0, []
-        with locked() as storage:
-            for entry in storage.db.list("removals"):
-                warning = storage.finish(entry)
-                if warning:
-                    errors.append(warning)
-            for job in storage.db.list("jobs"):
-                if job["kind"] != "draft" or active(job, app.state.queue.processes):
-                    continue
-                try:
-                    path = storage.path(job["output_path"], "drafts")
-                    warning = storage.remove({"jobs": [job["id"]]}, [path])
-                    if warning:
-                        errors.append(warning)
-                    removed += 1
-                except (OSError, ValueError):
-                    errors.append("No se pudo limpiar una vista exacta.")
-            busy_analyses = {a["id"] for a in storage.db.list("analyses") if active(a, app.state.analysis_queue.processes)}
-            known_drafts = {Path(j["output_path"]).stem for j in storage.db.list("jobs") if j["kind"] == "draft"}
-            targets = [
-                ("analysis", {".pcm", ".json"}, busy_analyses),
-                ("drafts", {".mp4"}, known_drafts),
-                ("uploads", {".part"}, app.state.active_uploads),
-            ]
-            for name, suffixes, busy in targets:
-                folder = storage.root / name
-                if folder.resolve() != folder:
-                    continue
-                for path in folder.iterdir():
-                    if path.suffix not in suffixes or path.stem in busy or not ID.fullmatch(path.stem):
-                        continue
-                    try:
-                        storage.path(path, name).unlink(missing_ok=True)
-                        removed += 1
-                    except (OSError, ValueError):
-                        errors.append("No se pudo limpiar un archivo temporal.")
-        return {"removed": removed, "errors": errors, "storage": storage.stats()}
+        removed, errors = cleanup_storage(app.state, force=True)
+        return {"removed": removed, "errors": errors, "storage": stats()}
 
     app.include_router(router)

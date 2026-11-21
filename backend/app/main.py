@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from base64 import b64encode
 from pathlib import Path
 from uuid import uuid4
 from typing import Literal
@@ -15,19 +16,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .config import Settings
+from .config import APP_VERSION, Settings, instance_identity
 from .database import Database
 from .models import ClipRequest
 from .split_layout import SPLIT_RENDER_VERSION
 from .services.media import MediaError, MediaService
-from .services.caption_layers import CaptionLayerRequest, CaptionLayers
+from .services.caption_layers import CaptionLayerRequest, CaptionLayers, HookLayerRequest
+from .text_graphics import text_tile, uses_text_tile
+from .emoji_assets import emoji_png, has_emoji
 from .services.jobs import JobQueue
-from .services.direct_capture import DirectCapture
-from .services.autoclip import AutoClip, register_autoclip
+from .services.autoclip import register_autoclip
 from .services.library import SUPPORTED_VIDEO, VideoLibrary
-from .services.live import LiveCapture, register_live
+from .services.live import LiveCapture, check_obs_idle, register_live
+from .services.multistream import MultiStream
 from .services.analysis import AnalysisQueue
-from .services.storage import ID, Storage, register_storage
+from .services.storage import ID, Storage, cleanup_storage, register_storage
 from .ai.routes import register_ai
 from .ai.models import capabilities
 from .captions import CaptionSegment, clip_captions, register_captions
@@ -59,13 +62,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def services(app: FastAPI):
         settings.prepare()
         app.state.db = Database(settings.data_dir / "clipzone.sqlite3")
         app.state.storage = Storage(app.state.db, settings.data_dir, settings.model_dir)
         app.state.media = MediaService(settings)
         app.state.caption_layers = CaptionLayers(app.state.media)
-        app.state.queue = JobQueue(app.state.db)
+        app.state.queue = JobQueue(app.state.db, app.state.storage)
         app.state.analysis_queue = AnalysisQueue(app.state.db, settings)
         app.state.model_downloads = ModelDownloads(settings.model_dir, settings.data_dir / "whisper-downloads.log")
         app.state.export_lock = Lock()
@@ -73,8 +76,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.library = VideoLibrary(settings, app.state.db, app.state.media, app.state.queue,
                                          app.state.export_lock, app.state.active_uploads)
         app.state.live = LiveCapture(settings, app.state.library)
-        app.state.direct = DirectCapture(settings, app.state.library)
-        app.state.autoclip = AutoClip(app.state.direct, app.state.analysis_queue)
+        app.state.multistream = MultiStream(app.state.library, app.state.analysis_queue)
+        app.state.direct, app.state.autoclip = app.state.multistream.primary
         # Archivos parciales nunca se muestran como vídeos importados.
         for path in (settings.data_dir / "uploads").glob("*.part"):
             if ID.fullmatch(path.stem):
@@ -82,15 +85,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     app.state.storage.path(path, "uploads").unlink(missing_ok=True)
                 except (ValueError, OSError):
                     logger.warning("Un archivo parcial quedó pendiente de limpieza.")
-        yield
-        await asyncio.to_thread(app.state.autoclip.shutdown)
-        await asyncio.to_thread(app.state.direct.shutdown)
-        await asyncio.to_thread(app.state.analysis_queue.shutdown)
-        await asyncio.to_thread(app.state.queue.shutdown)
-        await asyncio.to_thread(app.state.model_downloads.shutdown)
+        stop = asyncio.Event()
 
-    app = FastAPI(title="ClipZone Studio", version="0.3.0", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+        async def clean_storage():
+            try:
+                _, errors = await asyncio.to_thread(cleanup_storage, app.state)
+                if errors:
+                    logger.warning("Limpieza automática: %s", " ".join(set(errors)))
+            except Exception:
+                logger.exception("Falló la limpieza automática del almacenamiento.")
+
+        async def maintain_storage():
+            ticks = 1
+            while not stop.is_set():
+                await asyncio.to_thread(app.state.live.stop_for_low_storage)
+                if ticks % 12 == 0:
+                    await clean_storage()
+                ticks += 1
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+
+        await clean_storage()
+        maintenance = asyncio.create_task(maintain_storage())
+        try:
+            yield
+        finally:
+            stop.set()
+            await maintenance
+            await asyncio.to_thread(app.state.multistream.shutdown)
+            await asyncio.to_thread(app.state.analysis_queue.shutdown)
+            await asyncio.to_thread(app.state.queue.shutdown)
+            await asyncio.to_thread(app.state.model_downloads.shutdown)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        with settings.location.guard():
+            settings.data_dir = await asyncio.to_thread(settings.location.startup, lambda: check_obs_idle(settings))
+            async with services(app):
+                yield
+
+    app = FastAPI(title="ClipZone Studio", version=APP_VERSION, lifespan=lifespan)
+    app.add_middleware(CORSMiddleware, allow_origins=sorted(ORIGINS), allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type"])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 
     @app.middleware("http")
@@ -122,7 +159,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         dependencies = {name: bool(settings.binary(name)) for name in ("ffmpeg", "ffprobe")}
         return {"status": "ok" if all(dependencies.values()) else "missing_dependencies", "version": app.version,
-                "dependencies": dependencies, "ai_enabled": capabilities(settings)["ready"], "max_upload_bytes": settings.max_upload_bytes}
+                "dependencies": dependencies, "ai_enabled": capabilities(settings)["ready"], "max_upload_bytes": settings.max_upload_bytes,
+                "storage": {key: value for key, value in app.state.storage.space().items() if key != "directory"}}
+
+    @app.get("/api/instance")
+    def instance():
+        return instance_identity(settings.data_dir)
 
     @app.get("/api/videos")
     def videos():
@@ -187,12 +229,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def live_caption_layer(body: CaptionLayerRequest):
         return app.state.caption_layers.page(body)
 
+    @app.post("/api/graphics/hook")
+    def live_hook_layer(body: HookLayerRequest):
+        return {"image": app.state.caption_layers.hook(body)}
+
+    @app.post("/api/graphics/text")
+    def live_text_layer(body: HookLayerRequest):
+        if body.layer.kind != "text":
+            raise HTTPException(422, "Selecciona una capa de texto.")
+        tile = text_tile(body.layer, body.dimensions())
+        return {"image": b64encode(tile.png).decode("ascii"), "width": tile.width, "height": tile.height}
+
+    @app.get("/api/graphics/emojis/{identifier}.png")
+    def graphic_emoji(identifier: str):
+        data = emoji_png(identifier)
+        if data is None:
+            raise HTTPException(404, "Emoji no disponible.")
+        return Response(data, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
     def render_versions(body: ClipRequest) -> dict:
         versions = {}
         if body.captions and body.captions.enabled:
             versions["caption_render_version"] = CAPTION_RENDER_VERSION
         if body.fit == "split":
             versions["split_render_version"] = SPLIT_RENDER_VERSION
+        if any(uses_text_tile(layer) for layer in body.graphics):
+            versions["text_render_version"] = 2
         return versions
 
     def enqueue_clip(body: ClipRequest, provenance: dict | None = None, kind: str = "export"):
@@ -208,22 +270,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             auxiliary["overlay.ass"] = ass_script(cues, body.captions.style, body.dimensions(), body.safe_top,
                                                   body.safe_bottom, body.caption_seam())
         layers = []
+        uses_emoji = False
         duration = body.end - body.start
         for index, layer in enumerate(body.graphics):
             end = min(layer.end or duration, duration)
-            if layer.start >= end or layer.opacity == 0:
+            if layer.hidden or layer.start >= end or (layer.opacity == 0 and layer.text_style is None):
                 continue
             if layer.kind == "image" and layer.asset_id:
                 layers.append((layer, asset_file(app.state.db, settings, layer.asset_id)))
             elif layer.kind == "text" and layer.text.strip():
-                name = f"graphic{index}.ass"
-                auxiliary[name] = graphic_ass(layer, body.dimensions(), end)
+                if not uses_text_tile(layer):
+                    name = f"graphic{index}.ass"
+                    auxiliary[name] = graphic_ass(layer, body.dimensions(), end, body.caption_seam())
+                else:
+                    name = f"graphic{index}.png"
+                    auxiliary[name] = text_tile(layer, body.dimensions()).png
+                    uses_emoji |= bool(layer.opacity and has_emoji(layer.text))
                 layers.append((layer, name))
         source = Path(video["source_path"])
         media = app.state.media
         geometry = media.source_geometry(source, video) if body.fit == "split" else None
         command = media.render_command(source, output, body, use_ass="overlay.ass" in auxiliary,
                                        layers=layers, source_geometry=geometry)
+        if uses_emoji:
+            command[-1:-1] = ["-metadata", "comment=Emoji artwork by Twemoji contributors, CC BY 4.0: "
+                                          "https://github.com/jdecked/twemoji"]
         sidecars = [{"start": cue["start"], "end": cue["end"], "text": cue["text"]} for cue in cues] if cues and body.captions.sidecars and kind == "export" else None
         job = app.state.queue.submit(kind=kind, video_id=video["id"], command=command, output=output,
                                      duration=body.end - body.start, title=body.title.strip() or "Mi clip",
@@ -263,7 +334,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_ai(app, settings, find_video, enqueue_clip, public_job)
     register_captions(app, find_video)
     register_campaigns(app, settings)
-    register_storage(app)
+    register_storage(app, settings)
     register_live(app, public_video)
     register_autoclip(app, public_video)
 

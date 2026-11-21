@@ -65,6 +65,7 @@ class ClipRequest(RenderOptions):
 
 class AnalysisRequest(BaseModel):
     model: Literal["tiny", "base", "small"] = "tiny"
+    transcript_window: tuple[float, float] | None = None
     language: str = Field(default="auto", pattern="^(auto|es|en|pt|fr|de|it|ja|zh|ru|ar|hi|ko|nl|pl|tr|uk)$")
     min_duration: float = Field(default=15, ge=1, le=180, allow_inf_nan=False)
     max_duration: float = Field(default=45, ge=1, le=180, allow_inf_nan=False)

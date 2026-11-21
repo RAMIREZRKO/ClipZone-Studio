@@ -2,16 +2,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import subprocess
-from threading import Thread
+from threading import Event, Thread
+from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, sleep
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.services import direct_capture
+from app.main import create_app
+from app.services import direct_capture, multistream
 from app.services.direct_buffer import DirectBuffer, clean_session
+from app.services.direct_capture import CaptureSession
 from app.services.direct_source import DirectSource, StreamlinkSource, source_from_url
 from app.services.obs import LiveError
+from app.services.youtube_live import YouTubeBroadcast
 
 
 def wait_state(client, condition, timeout=15):
@@ -31,7 +36,9 @@ def wait_state(client, condition, timeout=15):
     ("https://kick.com/canal?token=prueba", "direct_url"),
     ("https://www.twitch.tv/videos/123", "direct_url"),
     ("https://kick.com/canal/videos/id", "direct_url"),
-    ("https://www.youtube.com/live/abcdef", "direct_youtube"),
+    ("https://www.youtube.com/live/abcdef", "direct_url"),
+    ("https://www.youtube.com/watch?v=JH-D4TkiOe4&token=fixture", "direct_url"),
+    ("https://www.youtube.com/watch?v=JH-D4TkiOe4&v=12345678901", "direct_url"),
 ])
 def test_direct_source_rejects_urls_outside_supported_public_channels(client, url, code):
     response = client.post("/api/live/direct/probe", json={"url": url})
@@ -101,6 +108,48 @@ def test_snapshot_uses_final_contiguous_segments_for_all_lengths(tmp_path, lengt
     selected = buffer.snapshot(length)
     assert sum(item.duration for item in selected) == length
     assert selected[-1].start == 308 and selected[0].start == 310 - length
+
+
+def test_missing_or_empty_segments_are_not_reported_as_saveable(tmp_path):
+    buffer = DirectBuffer(tmp_path)
+    paths = []
+    for index in range(3):
+        name = f"g00-{index:08d}.mkv"
+        path = tmp_path / name
+        path.write_bytes(b"segment")
+        assert buffer.accept(f"{name},{index * 2},{index * 2 + 2}".encode(), 0)
+        paths.append(path)
+    paths[1].unlink()
+    assert [segment.path for segment in buffer.snapshot(30)] == paths[2:]
+    paths[2].write_bytes(b"")
+    assert buffer.ready and [segment.path for segment in buffer.snapshot(30)] == paths[:1]
+    paths[0].unlink()
+    assert not buffer.ready and not buffer.snapshot(30)
+
+def test_youtube_saves_requested_duration_when_the_start_is_between_keyframes(client, settings):
+    direct = client.app.state.direct
+    folder = direct.root / ("f" * 32)
+    folder.mkdir()
+    source = DirectSource("youtube", "UC" + "x" * 22, "https://www.youtube.com/watch?v=abcdefghijk")
+    session = CaptureSession(source, "180p", DirectBuffer(folder), state="ended")
+    direct.session = session
+    command = [settings.binary("ffmpeg"), "-v", "error", "-y",
+               "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
+               "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+               "-t", "34", "-c:v", "libx264", "-threads:v", "2", "-preset", "ultrafast",
+               "-g", "120", "-sc_threshold", "0", "-c:a", "aac", "-f", "segment",
+               "-segment_time", "2", "-segment_list_type", "csv", "-segment_list", "pipe:1",
+               "-reset_timestamps", "1", "g00-%08d.mkv"]
+    result = subprocess.run(command, cwd=folder, check=True, capture_output=True, timeout=25)
+    for row in result.stdout.splitlines():
+        assert session.buffer.accept(row, 0)
+    standard = session.buffer.snapshot(30)
+    session.buffer.release(standard)
+    assert sum(segment.duration for segment in standard) < 29.5
+    response = client.post("/api/live/direct/captures", json={"seconds": 30})
+    assert response.status_code == 201, response.text
+    assert response.json()["duration"] == pytest.approx(30, abs=.15)
+    assert response.json()["video"]["has_audio"]
 
 
 def test_direct_handles_missing_dependency_and_blocks_external_origin(client, monkeypatch):
@@ -248,4 +297,226 @@ def test_real_direct_hls_records_background_remuxes_av_and_preserves_saved_clip(
     client.app.state.direct.shutdown()
     assert list((settings.data_dir / "direct-buffer").iterdir()) == []
     assert video.is_file() and client.get("/api/live/captures").json() == [capture]
+
+
+def test_two_direct_streams_have_independent_buffers_and_stop_controls(client, monkeypatch, local_hls):
+    parse = direct_capture.source_from_url
+
+    def local_source(url):
+        source = parse(url)
+        return DirectSource(source.platform, source.channel, local_hls)
+
+    monkeypatch.setattr(direct_capture, "source_from_url", local_source)
+    first = {"url": "https://kick.com/primero", "quality": "180p"}
+    second = {"url": "https://www.twitch.tv/segundo", "quality": "180p"}
+    assert client.post("/api/live/direct/start", json=first).status_code == 202
+    assert client.post("/api/live/direct/start?slot=1", json=first).status_code == 409
+    assert client.post("/api/live/direct/start?slot=1", json=second).status_code == 202
+    assert client.post("/api/live/direct/start?slot=2", json=second).status_code == 422
+    deadline = monotonic() + 25
+    while monotonic() < deadline:
+        states = [client.get(f"/api/live/direct/status?slot={slot}").json() for slot in (0, 1)]
+        if all(state["buffer_seconds"] > 0 for state in states):
+            break
+        sleep(.15)
+    assert all(state["buffer_seconds"] > 0 for state in states), states
+    assert [state["channel"] for state in states] == ["primero", "segundo"]
+    assert client.post("/api/live/direct/stop").json()["state"] == "stopping"
+    assert client.get("/api/live/direct/status?slot=1").json()["state"] == "capturing"
+    clip = client.post("/api/live/direct/captures?slot=1", json={"seconds": 30})
+    assert clip.status_code == 201, clip.text
+    assert (clip.json()["platform"], clip.json()["channel"]) == ("twitch", "segundo")
+    assert client.post("/api/live/direct/stop?slot=1").status_code == 200
+
+
+@pytest.mark.parametrize("maximum", [4, 6, 8])
+def test_registered_channels_capture_independently_and_release_capacity(client, monkeypatch, local_hls, maximum):
+    def local_source(url):
+        source = source_from_url(url)
+        return DirectSource(source.platform, source.channel, local_hls)
+
+    monkeypatch.setattr(direct_capture, "source_from_url", local_source)
+    limit = client.put("/api/live/direct/settings", json={"max_active": maximum})
+    assert limit.status_code == 200 and limit.json()["max_active"] == maximum
+    streams = []
+    channels = ["alfa", "bravo", "charlie", "delta", "eco", "foxtrot", "golf", "hotel", "india"]
+    for index, channel in enumerate(channels[:maximum + 1]):
+        host = ("kick.com", "twitch.tv")[index % 2]
+        response = client.post("/api/live/streamers", json={"url": f"https://{host}/{channel}"})
+        assert response.status_code == 200, response.text
+        streams.append(response.json())
+
+    def call(action, stream, body=None):
+        return client.post(f"/api/live/direct/{action}", params={"streamer": stream["id"]}, json=body)
+
+    def start(stream):
+        return call("start", stream, {"url": stream["url"], "quality": "180p"})
+
+    for stream in streams[:maximum]:
+        response = start(stream)
+        assert response.status_code == 202, response.text
+    assert start(streams[-1]).json()["code"] == "direct_limit"
+    assert client.delete("/api/live/streamers/" + streams[0]["id"]).json()["code"] == "streamer_busy"
+    deadline = monotonic() + 25
+    while monotonic() < deadline:
+        overview = client.get("/api/live/direct/channels").json()
+        states = {row["id"]: row["capture"] for row in overview["channels"]}
+        if all(states[row["id"]]["buffer_ready"] and states[row["id"]]["bytes"] > 0 for row in streams[:maximum]):
+            break
+        sleep(.15)
+    assert len(states) == maximum + 1 and overview["active"] == overview["max_active"] == maximum
+    assert all(states[stream["id"]]["channel"] == stream["id"].split(":")[1] for stream in streams[:maximum])
+    assert all(states[stream["id"]]["buffer_ready"] for stream in streams[:maximum])
+    assert not states[streams[-1]["id"]]["buffer_ready"]
+    assert all(state["max_bytes"] == 512 * 1024**2 for state in states.values())
+    assert 0 < overview["bytes"] <= overview["max_bytes"]
+    services = client.app.state.multistream.channels.values()
+    assert {auto.analysis for _, auto in services} == {client.app.state.analysis_queue}
+    if maximum > 4:
+        lowered = client.put("/api/live/direct/settings", json={"max_active": 4}).json()
+        assert lowered["active"] == maximum and lowered["max_active"] == 4
+        assert lowered["max_bytes"] == 512 * maximum * 1024**2
+        assert start(streams[-1]).json()["code"] == "direct_limit"
+        assert client.put("/api/live/direct/settings", json={"max_active": maximum}).status_code == 200
+    first, second = streams[:2]
+    assert call("stop", first).json()["state"] == "stopping"
+    for _ in range(75):
+        overview = client.get("/api/live/direct/channels").json()
+        if overview["active"] == maximum - 1:
+            break
+        sleep(.1)
+    assert overview["active"] == maximum - 1
+    assert client.get("/api/live/direct/status", params={"streamer": second["id"]}).json()["state"] == "capturing"
+    saved = call("captures", first, {"seconds": 30})
+    assert saved.status_code == 201 and saved.json()["channel"] == "alfa", saved.text
+    assert start(streams[-1]).status_code == 202
+    assert client.get("/api/live/direct/status", params={"streamer": first["id"]}).json()["buffer_seconds"] == 0
+    assert client.delete("/api/live/streamers/" + first["id"]).status_code == 200
+    assert client.get("/api/live/captures").json()[0]["id"] == saved.json()["id"]
+    for stream in streams[1:]:
+        call("stop", stream)
+
+
+def test_probe_state_is_per_channel_and_offline_cannot_start(client, monkeypatch):
+    sources = {"kick:fuera": "https://kick.com/fuera", "twitch:online": "https://www.twitch.tv/online"}
+    for url in sources.values():
+        assert client.post("/api/live/streamers", json={"url": url, "quality": "720p"}).status_code == 200
+    checking, release = Event(), Event()
+    qualities = {"fuera": [], "online": ["720p", "480p"]}
+
+    def inspect(source):
+        if source.channel == "fuera":
+            checking.set()
+            assert release.wait(10)
+        return qualities[source.channel]
+
+    monkeypatch.setattr(client.app.state.direct.engine, "inspect", inspect)
+
+    def call(action, identifier):
+        return client.post(f"/api/live/direct/{action}", params={"streamer": identifier},
+                           json={"url": sources[identifier], "quality": "720p", "seconds": 30})
+
+    def rows():
+        return {row["id"]: row for row in client.get("/api/live/direct/channels").json()["channels"]}
+
+    with ThreadPoolExecutor() as pool:
+        offline = pool.submit(call, "probe", "kick:fuera")
+        try:
+            assert checking.wait(5)
+            assert rows()["kick:fuera"]["connection"] == "checking"
+            assert rows()["twitch:online"]["connection"] == "unknown"
+            assert call("start", "kick:fuera").json()["code"] == "direct_busy"
+            assert call("probe", "twitch:online").json()["live"]
+        finally:
+            release.set()
+        assert offline.result(timeout=5).json()["live"] is False
+    current = rows()
+    assert current["kick:fuera"]["connection"] == "offline"
+    assert not current["kick:fuera"]["capture"]["buffer_ready"]
+    assert current["twitch:online"]["connection"] == "online"
+    assert current["twitch:online"]["qualities"] == ["720p", "480p"]
+    assert call("start", "kick:fuera").json()["code"] == "direct_offline"
+    assert call("captures", "kick:fuera").json()["code"] == "direct_empty"
+    qualities["fuera"] = ["720p"]
+    assert call("probe", "kick:fuera").json()["live"]
+    assert rows()["kick:fuera"]["connection"] == "online"
+
+
+def test_simultaneous_kick_twitch_and_youtube_keep_buffers_on_youtube_end(client, monkeypatch, local_hls):
+    channel = "UC" + "q" * 22
+    video = "abcdefghijk"
+    live_url = "https://www.youtube.com/@controlado/live"
+    state = "live"
+    looked_up = []
+
+    def youtube(url):
+        looked_up.append(url)
+        return YouTubeBroadcast(channel, "YouTube de prueba", state, video, local_hls.removeprefix("hls://"))
+
+    def local_source(url):
+        original = source_from_url(url)
+        if original.platform == "youtube":
+            return original
+        return DirectSource(original.platform, original.channel, local_hls)
+
+    monkeypatch.setattr(multistream, "resolve_youtube", youtube)
+    monkeypatch.setattr(direct_capture, "resolve_youtube", youtube)
+    monkeypatch.setattr(direct_capture, "source_from_url", local_source)
+    urls = {"kick:controlado": "https://kick.com/controlado", "twitch:controlado": "https://www.twitch.tv/controlado",
+            f"youtube:{channel}": live_url}
+    for key, url in urls.items():
+        assert client.post("/api/live/streamers", json={"url": url}).json()["id"] == key
+        assert client.post("/api/live/direct/start", params={"streamer": key}, json={"url": url, "quality": "180p"}).status_code == 202
+    deadline = monotonic() + 30
+    while monotonic() < deadline:
+        overview = client.get("/api/live/direct/channels").json()
+        if overview["active"] == 3 and all(row["capture"]["buffer_ready"] for row in overview["channels"]):
+            break
+        sleep(.15)
+    assert overview["active"] == 3 and all(row["capture"]["buffer_ready"] for row in overview["channels"]), overview
+    assert client.app.state.multistream.channels[f"youtube:{channel}"][1].analysis is client.app.state.analysis_queue
+    assert all(row["capture"]["max_bytes"] == 512 * 1024**2 for row in overview["channels"])
+    state = "ended"
+    selected = {"streamer": f"youtube:{channel}"}
+    deadline = monotonic() + 30
+    while monotonic() < deadline:
+        result = client.get("/api/live/direct/status", params=selected).json()
+        if result["state"] == "ended":
+            break
+        sleep(.2)
+    assert result["state"] == "ended" and result["broadcast_state"] == "ended" and result["buffer_ready"], result
+    assert f"https://www.youtube.com/watch?v={video}" in looked_up
+    saved = client.post("/api/live/direct/captures", params=selected, json={"seconds": 30})
+    assert saved.is_success and saved.json()["video"]["has_audio"], saved.text
+    assert saved.json()["channel_name"] == "YouTube de prueba"
+
+
+def test_registered_channel_settings_are_independent_and_survive_restart(settings):
+    one = "https://kick.com/primero"
+    two = "https://www.twitch.tv/segundo"
+    first = {"streamer": "kick:primero"}
+    with TestClient(create_app(settings)) as client:
+        assert client.put("/api/live/direct/settings", json={"max_active": 7}).status_code == 422
+        assert client.put("/api/live/direct/settings", json={"max_active": 10}).status_code == 200
+        assert client.post("/api/live/streamers", json={"url": one, "quality": "720p", "seconds": 120}).status_code == 200
+        assert client.post("/api/live/streamers", json={"url": two, "seconds": 30}).status_code == 200
+        template = client.post("/api/templates", json={"name": "Primero", "options": {"fit": "split"}}).json()
+        assert client.post("/api/live/streamers", json={"url": one, "template_id": template["id"]}).status_code == 200
+        assert client.post("/api/live/auto/config", params=first,
+                           json={"sensitivity": "high", "duration": 60, "detection_mode": "reaction"}).status_code == 200
+    with TestClient(create_app(settings)) as client:
+        overview = client.get("/api/live/direct/channels").json()
+        assert overview["max_active"] == 10 and overview["max_bytes"] == 5120 * 1024**2
+        rows = overview["channels"]
+        assert [(row["id"], row["seconds"]) for row in rows] == [("kick:primero", 120), ("twitch:segundo", 30)]
+        assert rows[0]["quality"] == "720p" and rows[0]["template_id"] == template["id"]
+        assert rows[0]["autoclip"]["options"]["sensitivity"] == "high"
+        assert rows[0]["autoclip"]["options"]["duration"] == 60
+        assert rows[0]["autoclip"]["options"]["detection_mode"] == "irl"
+        assert rows[1]["autoclip"]["options"]["sensitivity"] == "balanced"
+        assert rows[1]["autoclip"]["options"]["detection_mode"] == "mixed"
+        assert client.delete("/api/live/streamers/kick:primero").status_code == 200
+        assert client.get("/api/live/auto/status", params=first).status_code == 404
+        assert client.post("/api/live/streamers", params=first, json={"url": one, "seconds": 90}).status_code == 404
+        assert [row["id"] for row in client.get("/api/live/streamers").json()] == ["twitch:segundo"]
 

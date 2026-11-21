@@ -2,7 +2,7 @@
 
 Editor de vídeo **local para Windows**, con Python, FastAPI, FFmpeg y React + TypeScript. Interfaz en español, negro y verde neón. Inspirado en el flujo de clipping de OpusClip, con diseño propio y sin servicios de pago.
 
-**Versión 0.3.0 · Subtítulos y campañas.** El editor manual y la generación múltiple con Whisper incorporan subtítulos dinámicos, traducciones editables y capas promocionales para TikTok, Instagram Reels, YouTube Shorts y Facebook Reels.
+**Versión 4.0.0.** MultiStream incorpora YouTube Live junto a Kick y Twitch. El editor y la generación múltiple con Whisper mantienen subtítulos dinámicos, traducciones editables y capas promocionales para TikTok, Instagram Reels, YouTube Shorts y Facebook Reels.
 
 ## Ejecutar una instalación ya preparada
 
@@ -12,7 +12,7 @@ Después de instalar las dependencias y compilar el editor, haz doble clic en **
 .\scripts\start.ps1 -Open
 ```
 
-Abre [ClipZone Studio](http://127.0.0.1:8000). Cierra el servidor con `Ctrl+C`. Si PowerShell bloquea scripts, utiliza el `.cmd` o ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Open`; esa opción se aplica solo a ese proceso.
+El iniciador abre [ClipZone Studio](http://127.0.0.1:8000) cuando el servidor responde. Si ya está activa la misma versión del proyecto con tu biblioteca, abre el navegador desde esa instancia. Guarda los búferes y usa `Ctrl+C` en la terminal para cerrar el servidor antes de cambiar de versión. Si PowerShell bloquea scripts, utiliza el `.cmd` o ejecuta `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Open`. Esa opción se aplica solo a ese proceso.
 
 ## Instalar desde cero
 
@@ -48,7 +48,7 @@ Diagnóstico independiente:
 
 ## Qué incluye
 
-| Función | Versión 0.3.0 |
+| Función | Versión 4.0.0 |
 |---|---|
 | Importación | MP4, MOV, MKV, WebM, AVI, M4V, MTS y M2TS; copia local; límite configurable de 20 GB |
 | Biblioteca | Originales, metadatos y miniaturas persistidos en SQLite |
@@ -113,9 +113,9 @@ En **Gráficos y plantillas**, guarda el encuadre con un nombre como «Westcol �
 
 Las propuestas de **Momentos con IA** usan el encuadre actual para exportar varios clips. En **ClipZone Live → AutoClipping IA**, la opción **Plantilla para editar candidatos** aparece al guardar una plantilla con encuadre dividido. Selecciónala y pulsa **Editar** en un candidato para abrirlo con esa composición. La captura automática conserva el fragmento fuente y el encuadre se aplica al exportar.
 
-## ClipZone Live 3.0
+## ClipZone Live 4.0
 
-**Captura directa** mantiene el búfer de un canal público y autorizado de **Kick** o **Twitch** en el servidor local de ClipZone. Puedes cerrar la pestaña o el navegador después de iniciar la captura. Mantén el servidor de ClipZone en ejecución.
+**MultiStream IA** permite registrar canales autorizados de **Kick**, **Twitch** y **YouTube Live**. En **Límite de capturas simultáneas** puedes elegir **4, 6, 8 o 10** para las tres plataformas en conjunto. Puedes registrar más canales y cerrar el navegador mientras ClipZone sigue en ejecución.
 
 1. Instala la dependencia opcional desde la carpeta del proyecto y reinicia ClipZone:
 
@@ -124,33 +124,39 @@ Las propuestas de **Momentos con IA** usan el encuadre actual para exportar vari
    .\scripts\start.ps1
    ```
 
-2. Abre **ClipZone Live → Captura directa**. Pega la URL HTTPS de un canal autorizado, pulsa **Comprobar directo** y elige una de las calidades ofrecidas.
-3. Pulsa **Iniciar captura**. El panel muestra la conexión, el tiempo transcurrido, la duración real del búfer y su espacio en disco.
-4. Selecciona **30, 60, 90, 120 o 300 s**. Pulsa **Guardar fragmento** o **Ctrl + Alt + G** con ClipZone Live enfocado. El historial muestra la duración real que se guardó. Cada fragmento aparece en **Mis vídeos** y se puede abrir en Whisper, subtítulos o el editor de exportación.
-5. Pulsa **Detener captura** para conservar el último búfer durante esa sesión. Puedes guardarlo también cuando finaliza el directo o falla la reconexión. El búfer se retira al iniciar otro canal o cerrar el servidor. Los clips importados se administran desde **Mis vídeos**.
+2. Abre **ClipZone Live → Captura directa**, pega la URL HTTPS y pulsa **Añadir canal**. Para elegir una calidad, pulsa **Comprobar directo** en su tarjeta. La lista y los ajustes se guardan entre reinicios.
+3. Pulsa **Iniciar captura** en cada tarjeta que quieras grabar. Cada canal muestra su propia comprobación, conexión, captura y estado de AutoClipping. Si un canal está desconectado, vuelve a comprobarlo antes de iniciar. Puedes guardar mientras su búfer conserve un segmento disponible.
+4. En la tarjeta, elige **30, 60, 90, 120 o 300 s** y pulsa **Guardar fragmento**. **AutoClipping y atajo** selecciona el canal que recibe **Ctrl + Alt + G** y abre sus ajustes automáticos. El historial muestra la duración real y permite abrir el fragmento en el editor, Whisper, subtítulos o exportación.
+5. Pulsa **Detener captura** para conservar el último búfer y guardarlo desde la tarjeta. Cuando los búferes ocupan la capacidad configurada, iniciar un canal nuevo reutiliza el búfer detenido más antiguo que esté libre. Al reducir el límite, las capturas que ya están en curso continúan y se admiten nuevas cuando haya capacidad. **Eliminar canal** retira sus ajustes y su búfer temporal. Los clips importados siguen en **Mis vídeos**.
 
 Si la pestaña está cerrada, puedes guardar desde otra terminal de PowerShell:
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/live/direct/captures' -ContentType 'application/json' -Body '{"seconds":30}'
+Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/live/direct/captures?streamer=kick%3Ami_canal' -ContentType 'application/json' -Body '{"seconds":30}'
 ```
 
-Se admite una captura directa simultánea. Streamlink usa sus conectores integrados en modo público, sin navegador ni credenciales de usuario. Los bloqueos de la plataforma se presentan como errores. FFmpeg conserva video y audio por copia de flujos cuando es posible. Guarda en MP4 y prueba MKV si el contenedor MP4 resulta incompatible. El inicio de un fragmento se ajusta a un segmento completo en un fotograma clave, por lo que puede durar algo menos que la duración elegida.
+Usa el identificador de plataforma y canal, como `kick:mi_canal` o `twitch:mi_canal`. Streamlink usa sus conectores integrados en modo público. FFmpeg conserva video y audio por copia de flujos cuando es posible. Guarda en MP4 y prueba MKV si hace falta. El inicio se ajusta a un segmento completo en un fotograma clave.
 
-El búfer conserva una ventana de hasta cinco minutos más el segmento de corte cuando es necesario. El límite de disco es **512 MiB** por defecto. Se retiran los segmentos antiguos y se reservan **128 MiB** libres. La captura realiza hasta **tres reintentos** por sesión. Cuando se restablece la conexión, el nuevo material inicia un búfer continuo, sin concatenar el hueco con los segmentos anteriores.
+Cada búfer conserva hasta cinco minutos con un límite predeterminado de **512 MiB** en el disco seleccionado. Con ese tamaño, 4, 6, 8 y 10 búferes ocupan como máximo **2, 3, 4 y 5 GiB** respectivamente. Streamlink usa un búfer de transferencia de **16 MiB** por captura. ClipZone retira segmentos antiguos, avisa al quedar **10 GB** libres y detiene la captura al llegar a **5 GB**. La captura realiza hasta tres reintentos por sesión. Tras una reconexión, el material nuevo inicia un búfer continuo.
 
-**YouTube Live.** El conector de Streamlink contempla directos HLS y formatos con audio y video separados. Se mantiene fuera de la captura directa hasta validar esas variantes y las condiciones de acceso. Para emisiones autorizadas sigue disponible el método OBS. [Conectores de Streamlink](https://streamlink.github.io/latest/plugins.html) · [Conector de YouTube](https://github.com/streamlink/streamlink/blob/8.6.3/src/streamlink/plugins/youtube.py) · [Segmentador de FFmpeg](https://ffmpeg.org/ffmpeg-formats.html#segment_002c-stream_005fsegment_002c-ssegment).
+**YouTube Live.** Introduce un enlace `https://www.youtube.com/@canal/live`, `https://www.youtube.com/watch?v=ID`, `https://www.youtube.com/live/ID` o `https://youtu.be/ID`. ClipZone identifica el canal y conserva una sola tarjeta con sus preferencias. Añadir otro enlace del mismo canal actualiza la URL cuando su captura está detenida. Usa `@canal/live` para futuras emisiones del canal o el enlace al vídeo para una emisión concreta.
+
+**Comprobar directo** distingue emisiones activas, programadas, finalizadas, vídeos bajo demanda y canales desconectados. La captura empieza cuando YouTube confirma que el enlace está en directo y Streamlink ofrece una calidad HLS compatible. Selecciona 720p, 1080p o 1080p60 cuando estén disponibles. Streamlink y FFmpeg combinan las pistas en las variantes HLS que entregan el audio por separado. Si el inicio de un fragmento de YouTube cae entre fotogramas clave, FFmpeg recorta al tiempo solicitado al guardar, lo que puede tardar más. ClipZone se conecta sin iniciar sesión y trata las restricciones como errores de acceso. [Conector de YouTube de Streamlink](https://github.com/streamlink/streamlink/blob/8.6.3/src/streamlink/plugins/youtube.py)
 
 ### AutoClipping IA
 
-1. Instala el detector local de voz con `.\.venv\Scripts\python.exe -m pip install -r backend/requirements-autoclip.txt` y reinicia ClipZone. Usa un modelo de Whisper verificado del panel **Momentos con IA**. **Tiny** es el recomendado para comenzar. También puedes elegir **Base** o **Small**.
-2. Inicia una transmisión autorizada desde **Captura directa** y activa **AutoClipping IA**. Elige una duración de **30, 60 o 90 s**, la sensibilidad, el umbral editorial, los segundos anteriores y posteriores, la frecuencia mínima y el máximo por hora.
-3. El detector compara la intensidad con el nivel reciente y busca actividad compatible con voz. Puede indicar una posible reacción vocal intensa. Los picos por sí solos no identifican risas ni gritos. Whisper transcribe hasta **24 s** de contexto alrededor del evento. La puntuación de **0 a 100** estima el interés editorial a partir del audio, la voz, el gancho, el contexto, la continuidad y el cierre.
-4. Revisa los candidatos con **Reproducir**, **Conservar** o **Descartar**. **Editar** conserva el candidato, lo incorpora a **Mis vídeos** y abre el editor. Puedes seguir usando la captura manual y exportar desde el editor.
+1. Instala el detector local de voz con `.\.venv\Scripts\python.exe -m pip install -r backend/requirements-autoclip.txt` y reinicia ClipZone. Instala **Whisper Tiny** desde **Momentos con IA** para AutoClipping.
+2. Inicia una transmisión autorizada desde **Captura directa** y activa **AutoClipping IA**. Elige el modo por canal, una duración de **30, 60 o 90 s**, la sensibilidad, el umbral editorial, los segundos anteriores y posteriores, la frecuencia mínima y el máximo por hora.
+3. En **Gameplay**, AutoClipping busca acciones y resultados del juego cerca de los eventos detectados. **IRL / Just Chatting** toma muestras de habla sostenida y busca pasajes con anécdotas, revelaciones, preguntas con respuesta, humor, posturas argumentadas y reacciones emocionales. **Mixto** combina ambas vías. Whisper Tiny transcribe hasta **24 s** por candidato en la cola compartida. El análisis de IRL utiliza el contexto del pasaje y funciona con conversaciones de volumen estable. Penaliza la repetición y la baja confianza de la transcripción, con señales en español e inglés. Los canales guardados como **Reacciones del streamer** pasan a **IRL / Just Chatting** y conservan sus ajustes de duración, umbral e intervalo.
+4. Revisa los motivos y abre **Señales de la puntuación** para ver las señales consideradas. Las notas del historial anterior conservan su valor original. **Editar** conserva el candidato, lo incorpora a **Mis vídeos** y abre el editor.
 
-La duración seleccionada es un máximo. La ventana termina tras los segundos posteriores configurados y se extiende hacia atrás hasta la duración elegida. **Segundos anteriores** es el mínimo que debe existir antes del evento. Si hay una reconexión antes de completar la ventana, se descarta esa ventana para evitar unir instantes discontinuos. El sistema limita los solapamientos, mantiene un solo candidato a la vez y comparte un único proceso Whisper con el análisis manual. El procesado en directo usa CPU y dos hilos para Whisper. Si el trabajador está ocupado, se omite el candidato. OBS sigue disponible para captura manual.
+La ventana termina tras los segundos posteriores configurados. **Segundos anteriores** indica el mínimo que debe existir antes del evento. Cada canal mantiene un candidato en proceso y hasta cuatro señales recientes como alternativas. El intervalo mínimo se cuenta desde el último candidato guardado. AutoClipping y los análisis manuales comparten una cola con una inferencia de Whisper a la vez. Las inferencias de AutoClipping usan dos hilos y pueden esperar hasta 60 s en la cola. La extracción de audio y los renders de candidatos se serializan entre canales.
 
-Hay **512 MiB** para candidatos pendientes de revisar, separados del búfer directo. Conservar o descartar libera su espacio temporal. Al alcanzar el límite se omiten nuevos candidatos para que puedas revisar los que ya están guardados. Los clips conservados se administran desde la biblioteca. [Detector de voz WebRTC para Python](https://github.com/daanzu/py-webrtcvad-wheels).
+Abre **Diagnóstico del canal** para consultar segmentos con audio, transcripciones, puntuación máxima, motivos acumulados de filtrado y omisión, y el último error. Los estados de cola y transcripción se muestran por separado.
+
+La cuota de candidatos pendientes es de **5 GB** de forma predeterminada. En **AutoClipping IA → Límite de almacenamiento de candidatos** puedes elegir **1, 5, 10 o 20 GB**. La cuota es compartida entre canales y se guarda en la biblioteca. Al llenarla o reducirla, se conservan los candidatos existentes. Conservar o descartar un candidato libera su espacio temporal. El búfer directo mantiene su límite de **512 MiB** por canal.
+
+Puedes guardar la puntuación y desactivar AutoClipping con el canal detenido o desconectado. Al detenerse la captura se cancela el análisis de ese canal y se conservan sus preferencias y los candidatos ya guardados. Si otra instancia está utilizando la biblioteca, el inicio indica la ruta en uso y cómo cerrar el servidor existente. [Detector de voz WebRTC para Python](https://github.com/daanzu/py-webrtcvad-wheels).
 
 ### Método alternativo con OBS Studio
 
@@ -173,6 +179,14 @@ La integración se conecta a OBS en `127.0.0.1`. ClipZone conserva la repetició
 Consulta la [guía de OBS Studio](https://obsproject.com/kb/OBS-Studio-Overview) y el [protocolo OBS WebSocket 5](https://github.com/obsproject/obs-websocket/blob/master/docs/generated/protocol.md).
 
 ## Biblioteca, exportaciones y almacenamiento
+
+Desde **Almacenamiento → Cambiar carpeta** puedes examinar las unidades locales o escribir una ruta absoluta, por ejemplo `E:\ClipZone\data`. Elige una carpeta vacía o una que aún no exista. Detén las capturas directas y el búfer de OBS antes de programar el cambio. Luego cierra la terminal del servidor con **Ctrl+C** y vuelve a abrir ClipZone Studio.
+
+Durante el siguiente arranque, ClipZone copia la biblioteca, verifica cada archivo con SHA-256, comprueba SQLite y actualiza sus rutas administradas. Solo después activa la nueva carpeta y retira las copias anteriores verificadas. La pantalla de almacenamiento indica el resultado o si quedaron copias antiguas. Si la verificación falla, la biblioteca original sigue disponible y puedes cancelar o reintentar el cambio. Los destinos externos al almacenamiento, como una carpeta de OBS configurada aparte o los modelos de Whisper, conservan su ubicación. Si OBS usaba `live-inbox`, actualiza la carpeta de grabaciones del perfil de OBS tras la migración.
+
+La pantalla muestra el espacio libre y la capacidad del disco seleccionado. ClipZone avisa con **10 GB** libres, y con **5 GB** detiene las capturas directas y el búfer de OBS vinculado a su carpeta de repeticiones. El espacio de los temporales de análisis se recupera automáticamente tras 24 horas, y las vistas exactas caducan a los siete días. La caché de vistas exactas completadas admite hasta **1 GB**; se empieza por liberar las más antiguas. Los vídeos importados y las exportaciones finales se conservan.
+
+Si arrancas con `CLIPZONE_DATA_DIR`, esa ruta fija prevalece sobre la selección de la instalación. Para una instancia aislada con su propio selector, añade `CLIPZONE_STORAGE_CONFIG` con la ruta de su archivo de configuración.
 
 En **Mis vídeos** y **Exportaciones**, pulsa **Eliminar** en un elemento o marca varios y pulsa **Eliminar selección**. Por defecto se quita el registro y se conservan los archivos en disco. Si seleccionas **Borrar los archivos administrados**, también se eliminan las copias de ClipZone. Quitar un vídeo retira sus análisis y vistas previas del historial. Los clips exportados asociados se conservan. Los archivos originales que importaste desde fuera de ClipZone permanecen en su ubicación.
 
@@ -227,11 +241,21 @@ Importa `demo/phase2-spoken-demo.mp4`, elige **Inglés** y prueba duraciones de 
 2. Abre **Subtítulos dinámicos**, selecciona un análisis completado y pulsa **Generar desde Whisper**. Puedes añadir segmentos manualmente. Ajusta tiempos en segundos del vídeo original, corrige texto, divide, combina, elimina o usa búsqueda y reemplazo. **Guardar subtítulos** guarda las ediciones en otra pista de SQLite. La transcripción de Whisper queda disponible en el historial.
 3. Elige **Clásico**, **Hormozi**, **Karaoke** o **Minimalista**. Ajusta tipografía, colores, contorno, sombra, fondo, alineación, posición en la zona segura y palabras por línea. Los segmentos corregidos o traducidos conservan sus tiempos de frase. Cuando las palabras cambian, su resaltado se reparte dentro del intervalo en vez de usar marcas de palabras distintas.
 4. Elige **Idioma de los subtítulos** para trabajar en una traducción separada. Escribe o corrige cada traducción o importa un SRT/VTT con la misma cantidad y orden de segmentos. La aplicación usa el texto importado y conserva los tiempos de la pista de origen. Al exportar ese idioma se omiten los segmentos sin traducción.
-5. En **Gráficos y plantillas**, importa tus PNG transparentes y añade textos. Arrastra cada capa en **Encuadre en directo**, usa las flechas con la capa enfocada o introduce la posición numérica. Controla tamaño, opacidad y tiempos relativos a cada clip. **Todo el clip** mantiene la capa durante el fragmento completo. Límites por PNG: 16 MB y 4096 × 4096.
+5. En **Gráficos y plantillas**, importa PNG transparentes y añade capas de texto. Arrastra cada capa en **Encuadre en directo**, usa las flechas con la capa enfocada o introduce la posición numérica. Límites por PNG: 16 MB y 4096 × 4096.
 6. Aplica un ejemplo de **Campaña de YouTube** o **Campaña de Kick**, asigna tu propio logo y edita los mensajes. Guarda la plantilla con tus ajustes. Al usar **Generar seleccionados** en Momentos con IA, cada clip del lote recibe esa composición. Las plantillas guardan ajustes y referencias a PNG, mientras que cada vídeo aporta su propia pista de subtítulos.
 7. Activa **Activar subtítulos** para incrustarlos. Marca **Archivos SRT y VTT** si también quieres descargas separadas. Esto funciona en combinación con los subtítulos incrustados o por separado. Usa **Vista exacta** para revisar el MP4 antes de exportar. Guarda las ediciones de texto y tiempo para regenerar **Vista exacta**.
 
 **Encuadre en directo**, **Vista exacta** y el MP4 dibujan los subtítulos con FFmpeg y libass en el mismo lienzo de salida. La posición y los márgenes superior e inferior se miden sobre todo el lienzo. Esto incluye las bandas de **Ajustar completo** y el fondo de **Fondo difuminado**. Un cambio de estilo, idioma, zona segura o revisión invalida **Vista exacta** y permite regenerarla con los ajustes actuales.
+
+### Editor de texto
+
+- Pulsa **Agregar texto** o **Crear texto gancho**. El nombre toma el contenido de la capa. Para editar el nombre, abre **Opciones avanzadas de la capa**. También puedes duplicar, ocultar o eliminar cada capa.
+- Pulsa **Insertar emoji** en **Contenido** y elige una categoría o busca por nombre. El emoji se inserta en el cursor o reemplaza la selección. Puedes pegar más emojis Unicode, incluidas banderas y secuencias de varios caracteres. El selector, **Encuadre en directo**, **Vista exacta** y el MP4 usan gráficos a color locales. [Twemoji 17.0.3 · CC BY 4.0](backend/app/emoji/ATTRIBUTION.md)
+- En **Estilo**, elige uno de los seis preajustes o personaliza la tipografía, la alineación, el fondo, el contorno y la sombra. El fondo se ajusta al bloque de texto y tiene su propia opacidad. Guarda el estilo con un nombre para reutilizarlo en otra capa, incluido un gancho.
+- En **Duración**, arrastra los dos extremos para fijar la aparición y la desaparición. Los segundos son relativos al inicio del clip. **Mostrar durante todo el clip** sigue la duración actual. Para escribir segundos exactos, abre **Tiempos avanzados**.
+- La vista en directo genera el PNG del texto con Pillow. **Vista exacta** y la exportación usan el mismo PNG y FFmpeg lo coloca en el video. Las capas guardadas con el formato anterior conservan su estilo hasta que se edita su apariencia o contenido.
+
+Las fuentes Montserrat, Poppins, Anton y Roboto se incluyen con sus licencias OFL. Arial e Impact se cargan desde Windows. Si faltan, ClipZone usa Roboto y Anton respectivamente. [Google Fonts, revisión de las fuentes incluidas](https://github.com/google/fonts/tree/869789e84da92782c144d83d69b64cec54905b5f/ofl)
 
 **Instalación opcional de Argos Translate.** La edición e importación están listas en la instalación base. ClipZone puede invocar un entorno local de Argos que ya tenga el par directo instalado, como es→en o en→es. Se verificaron Python 3.12 x64 en este equipo y los requisitos publicados de Argos y CTranslate2 para Windows. El adaptador usa CPU con cuatro hilos, un proceso a la vez y segmentos por página. La inferencia real de Argos requiere los paquetes de cada dirección. [Argos Translate](https://argos-translate.readthedocs.io/en/latest/index.html) · [CTranslate2 para Windows](https://opennmt.net/CTranslate2/installation.html)
 
@@ -322,7 +346,7 @@ data/
 | `CLIPZONE_OBS_PORT` | Puerto local del servidor WebSocket de OBS, predeterminado `4455` |
 | `CLIPZONE_OBS_PASSWORD` | Contraseña del servidor WebSocket de OBS, leída solo por el backend |
 | `CLIPZONE_OBS_REPLAY_DIR` | Carpeta local de repeticiones, predeterminada `live-inbox` dentro de `CLIPZONE_DATA_DIR` |
-| `CLIPZONE_DIRECT_BUFFER_MB` | Límite de la carpeta temporal de captura directa en MiB. Valor predeterminado `512` y rango de 32 a 8192 |
+| `CLIPZONE_DIRECT_BUFFER_MB` | Límite del búfer de captura directa por canal en MiB. Valor predeterminado `512` y rango de 32 a 8192 |
 | `CLIPZONE_FFPROBE` | Ruta completa a `ffprobe.exe` |
 | `CLIPZONE_MAX_UPLOAD_GB` | Límite entero en GB; predeterminado: `20` |
 

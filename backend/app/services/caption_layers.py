@@ -10,7 +10,7 @@ from threading import Lock
 from pydantic import Field, model_validator
 
 from ..captions import CaptionSegment, clip_captions
-from ..composition import CaptionLanguage, CaptionStyle, ass_header, caption_pages, caption_position, caption_rows
+from ..composition import CaptionLanguage, CaptionStyle, GraphicLayer, ass_header, caption_pages, caption_position, caption_rows, graphic_ass
 from ..models import RenderOptions
 from .media import CREATE_NO_WINDOW, MediaError, MediaService
 
@@ -30,6 +30,10 @@ class CaptionLayerRequest(RenderOptions):
         if not 0 <= self.time < self.end - self.start:
             raise ValueError("El tiempo de previsualización debe estar dentro del clip.")
         return self
+
+
+class HookLayerRequest(RenderOptions):
+    layer: GraphicLayer
 
 
 class CaptionLayers:
@@ -64,6 +68,13 @@ class CaptionLayers:
         with self.lock:
             images = self._render_cached(dimensions, document, len(indexes))
         return {"start": selected.start, "end": selected.end, "frames": frames, "images": images}
+
+    def hook(self, body: HookLayerRequest) -> str:
+        layer = body.layer.model_copy(update={"start": 0})
+        dimensions = body.dimensions()
+        document = graphic_ass(layer, dimensions, 1, body.caption_seam())
+        with self.lock:
+            return self._render_cached(dimensions, document, 1)[0]
 
     def _render(self, dimensions, document: str, count: int) -> tuple[str, ...]:
         width, height = dimensions

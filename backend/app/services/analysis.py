@@ -1,7 +1,9 @@
 """Cola independiente para Whisper; conserva transcripciones y permite reutilizarlas."""
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
-from threading import Event, Lock, RLock
+from threading import Condition, RLock
 import json
 import os
 import subprocess
@@ -23,11 +25,20 @@ class AnalysisCancelled(Exception):
     pass
 
 
+class LiveWhisperQueueTimeout(TimeoutError):
+    pass
+
+
+class LiveWhisperError(RuntimeError):
+    pass
+
+
 class AnalysisQueue:
     def __init__(self, db: Database, settings: Settings):
         self.db, self.settings = db, settings
         self.lock = RLock()
-        self.whisper_slot = Lock()
+        self.whisper_queue = Condition()
+        self.whisper_turns = deque()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipzone-ai")
         self.processes: dict[str, subprocess.Popen] = {}
         self.closed = False
@@ -75,6 +86,23 @@ class AnalysisQueue:
     def _worker_command(self, audio: Path, model: Path, language: str, result: Path) -> list[str]:
         return [sys.executable, "-m", "app.ai.worker", "--audio", str(audio), "--model", str(model),
                 "--language", language, "--output", str(result)]
+
+    @contextmanager
+    def whisper_turn(self, check):
+        ticket = object()
+        with self.whisper_queue:
+            self.whisper_turns.append(ticket)
+        try:
+            with self.whisper_queue:
+                while self.whisper_turns[0] is not ticket:
+                    check()
+                    self.whisper_queue.wait(.2)
+            check()
+            yield
+        finally:
+            with self.whisper_queue:
+                self.whisper_turns.remove(ticket)
+                self.whisper_queue.notify_all()
 
     def _process(self, identifier: str, command: list[str], *, whisper: bool, duration: float, cpu_threads: int = 4):
         env = {**os.environ, "PYTHONPATH": str(ROOT / "backend"), "PYTHONUTF8": "1"}
@@ -125,8 +153,11 @@ class AnalysisQueue:
                 self._update(identifier, status="running", stage="Preparando audio")
             cached = next((a for a in self.db.list("analyses") if a["video_id"] == video["id"] and a["status"] == "completed"
                            and a.get("options", {}).get("model") == options.model
-                           and a.get("options", {}).get("language") == options.language and a.get("result")), None)
-            if options.reuse_transcript and cached:
+                           and a.get("options", {}).get("language") == options.language
+                           and not a.get("options", {}).get("transcript_window") and a.get("result")), None)
+            window = options.transcript_window
+            duration = window[1] - window[0] if window else video["duration"]
+            if options.reuse_transcript and not window and cached:
                 transcript = cached["result"]["transcript"]
                 self._update(identifier, progress=92, stage="Reutilizando transcripción", reused_transcript=True)
             else:
@@ -134,17 +165,25 @@ class AnalysisQueue:
                 if not ffmpeg:
                     raise RuntimeError("Falta FFmpeg para extraer el audio.")
                 command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-protocol_whitelist", "file,pipe",
-                           "-i", video["source_path"], "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                           *(["-ss", str(window[0])] if window else []), "-i", video["source_path"],
+                           *(["-t", str(duration)] if window else []), "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
                            "-f", "s16le", "-progress", "pipe:1", "-nostats", str(audio)]
-                self._process(identifier, command, whisper=False, duration=video["duration"])
-                with self.whisper_slot:
+                self._process(identifier, command, whisper=False, duration=duration)
+                self._update(identifier, stage="En cola de Whisper")
+                with self.whisper_turn(lambda: self._check(identifier)):
                     self._process(identifier, self._worker_command(audio, self.settings.model_dir / f"{options.model}.pt", options.language, output),
-                                  whisper=True, duration=video["duration"], cpu_threads=options.cpu_threads)
+                                  whisper=True, duration=duration, cpu_threads=options.cpu_threads)
                 transcript = json.loads(output.read_text(encoding="utf-8"))
+                if window:
+                    for word in transcript["words"]:
+                        word["start"] = min(window[1], word["start"] + window[0])
+                        word["end"] = min(window[1], word["end"] + window[0])
+                    transcript["words"] = [word for word in transcript["words"] if word["end"] > word["start"]]
+                    transcript["text"] = " ".join(word["text"] for word in transcript["words"])
             self._check(identifier)
             self._update(identifier, progress=95, stage="Detectando y puntuando momentos")
             words = [Word(**w) for w in transcript["words"]]
-            moments = detect_moments(words, video["duration"], options.min_duration, options.max_duration,
+            moments = [] if window else detect_moments(words, video["duration"], options.min_duration, options.max_duration,
                                      options.max_clips, transcript.get("energy"))
             with self.lock:
                 self._check(identifier)
@@ -161,32 +200,45 @@ class AnalysisQueue:
         finally:
             self._cleanup(identifier)
 
-    def transcribe_live(self, audio: Path, model: str, output: Path, stop: Event) -> dict | None:
-        with self.lock:
-            if self.closed or stop.is_set() or any(item["status"] in {"queued", "running"} for item in self.db.list("analyses")):
-                return None
-            if not self.whisper_slot.acquire(blocking=False):
-                return None
+    def transcribe_live(self, audio: Path, model: str, output: Path, stop, on_start=None) -> dict | None:
+        expires = time.monotonic() + 60
+        def check():
+            if self.closed or stop.is_set():
+                raise AnalysisCancelled()
+            if time.monotonic() >= expires:
+                raise LiveWhisperQueueTimeout("Se agotaron los 60 s de espera en la cola de Whisper.")
         try:
-            env = {**os.environ, "PYTHONPATH": str(ROOT / "backend"), "PYTHONUTF8": "1",
-                   "CLIPZONE_WHISPER_THREADS": "2", "OMP_NUM_THREADS": "2"}
-            command = self._worker_command(audio, self.settings.model_dir / f"{model}.pt", "auto", output)
-            deadline = time.monotonic() + {"tiny": 50, "base": 80, "small": 120}[model]
-            with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                  env=env, creationflags=CREATE_NO_WINDOW, start_new_session=os.name != "nt") as process:
-                try:
-                    while process.poll() is None:
-                        if stop.wait(.2) or self.closed:
-                            return None
-                        if time.monotonic() > deadline:
-                            raise RuntimeError("Whisper superó el tiempo disponible para un candidato.")
-                    if process.returncode:
-                        raise RuntimeError("Whisper no pudo transcribir el candidato con el modelo elegido.")
-                    return json.loads(output.read_text(encoding="utf-8"))
-                finally:
-                    terminate_tree(process)
-        finally:
-            self.whisper_slot.release()
+            with self.whisper_turn(check):
+                if on_start:
+                    on_start()
+                return self._transcribe_candidate(audio, model, output, stop)
+        except AnalysisCancelled:
+            return None
+
+    def _transcribe_candidate(self, audio: Path, model: str, output: Path, stop) -> dict | None:
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "backend"), "PYTHONUTF8": "1",
+               "CLIPZONE_WHISPER_THREADS": "2", "OMP_NUM_THREADS": "2"}
+        command = [*self._worker_command(audio, self.settings.model_dir / f"{model}.pt", "auto", output),
+                   "--live-evidence"]
+        deadline = time.monotonic() + 50
+        with tempfile.TemporaryFile(mode="w+b") as errors, subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errors,
+            env=env, creationflags=CREATE_NO_WINDOW, start_new_session=os.name != "nt",
+        ) as process:
+            try:
+                while process.poll() is None:
+                    if stop.wait(.2) or self.closed:
+                        return None
+                    if time.monotonic() > deadline:
+                        raise LiveWhisperError(f"Whisper {model} superó los 50 s de inferencia del candidato.")
+                if process.returncode:
+                    errors.seek(0, os.SEEK_END)
+                    errors.seek(max(0, errors.tell() - 1500))
+                    details = errors.read().decode("utf-8", errors="replace").strip()
+                    raise LiveWhisperError(f"Whisper {model} no pudo transcribir el candidato. {details}".strip())
+                return json.loads(output.read_text(encoding="utf-8"))
+            finally:
+                terminate_tree(process)
 
     def cancel(self, identifier: str):
         with self.lock:

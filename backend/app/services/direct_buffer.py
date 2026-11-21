@@ -5,6 +5,7 @@ import csv
 from math import isfinite
 from pathlib import Path
 import re
+from stat import S_ISREG
 
 SESSION_NAME = re.compile(r"[a-f0-9]{32}")
 SEGMENT_NAME = re.compile(r"g[0-9]{2}-[0-9]{8}\.mkv")
@@ -92,15 +93,34 @@ class DirectBuffer:
             measured = self.measure()
         return measured
 
-    def snapshot(self, seconds: int) -> tuple[Segment, ...]:
+    def snapshot(self, seconds: int, *, include_boundary: bool = False) -> tuple[Segment, ...]:
         chosen = []
         duration = 0.
         for segment in reversed(self.closed):
+            if not self.playable(segment):
+                if chosen:
+                    break
+                continue
             if chosen and duration + segment.duration > seconds + .06:
+                if include_boundary and duration < seconds - .06:
+                    chosen.append(segment)
                 break
             chosen.append(segment)
             duration += segment.duration
         return self.hold(reversed(chosen))
+
+    @staticmethod
+    def playable(segment: Segment) -> bool:
+        path = segment.path
+        try:
+            info = path.lstat()
+            return S_ISREG(info.st_mode) and info.st_size > 0
+        except OSError:
+            return False
+
+    @property
+    def ready(self) -> bool:
+        return any(self.playable(segment) for segment in reversed(self.closed))
 
     def hold(self, segments) -> tuple[Segment, ...]:
         frozen = tuple(replace(item) for item in segments)

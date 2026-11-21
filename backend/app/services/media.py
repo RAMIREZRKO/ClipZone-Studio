@@ -110,20 +110,26 @@ class MediaService:
         width, height = request.dimensions()
         for index, (layer, asset) in enumerate(layers or []):
             label = f"layer{index}"
-            if layer.kind == "text":
+            if layer.kind == "text" and str(asset).endswith(".ass"):
                 graph += f";[{current}]ass={asset}[{label}]"
             else:
                 image_index += 1
                 inputs += ["-protocol_whitelist", "file,pipe", "-f", "image2", "-pattern_type", "none", "-i", str(asset)]
-                w = max(2, round(width * layer.size / 200) * 2)
-                h = max(2, round(height * .4) * 2)
+                if layer.kind == "image":
+                    w = max(2, round(width * layer.size / 200) * 2)
+                    h = max(2, round(height * .4) * 2)
+                    filters = (f"format=rgba,scale={w}:{h}:force_original_aspect_ratio=decrease:"
+                               f"force_divisible_by=2,colorchannelmixer=aa={layer.opacity / 100:.3f},format=yuva420p")
+                    seam = None
+                else:
+                    filters = "format=yuva420p"
+                    seam = request.caption_seam() if layer.anchor == "split" else None
                 x = f"W*{layer.x / 100:.6f}-w/2"
-                y = f"H*{layer.y / 100:.6f}-h/2"
+                y = f"{seam}-h/2" if seam is not None else f"H*{layer.y / 100:.6f}-h/2"
                 end = min(layer.end or (request.end - request.start), request.end - request.start)
                 enable = f"gte(t,{layer.start:.6f})*lt(t,{end:.6f})"
                 graph += (
-                    f";[{image_index}:v:0]format=rgba,scale={w}:{h}:force_original_aspect_ratio=decrease:"
-                    f"force_divisible_by=2,colorchannelmixer=aa={layer.opacity / 100:.3f},format=yuva420p[logo{index}];"
+                    f";[{image_index}:v:0]{filters}[logo{index}];"
                     f"[{current}][logo{index}]overlay=x='{x}':y='{y}':eof_action=repeat:enable='{enable}'[{label}]"
                 )
             current = label

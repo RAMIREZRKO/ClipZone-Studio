@@ -2,12 +2,13 @@
 from typing import Annotated, Literal
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .captions import Identifier, Language
 
 Color = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
 Font = Literal["Arial", "Segoe UI", "Verdana", "Tahoma", "Impact"]
+GraphicFont = Font | Literal["Montserrat", "Poppins", "Anton", "Roboto"]
 Alignment = Literal["left", "center", "right"]
 CaptionLanguage = Literal["original"] | Language
 CAPTION_RENDER_VERSION = 3
@@ -42,23 +43,51 @@ class CaptionOptions(CaptionPreferences):
     revision: Identifier | None = None
 
 
+class GraphicTextStyle(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    bold: bool = True
+    italic: bool = False
+    underline: bool = False
+    align: Alignment = "center"
+    background_color: Color = "#000000"
+    background_transparent: bool = True
+    background_opacity: int = Field(default=100, ge=0, le=100)
+    padding: int = Field(default=12, ge=0, le=100)
+    radius: int = Field(default=10, ge=0, le=100)
+    outline_color: Color = "#000000"
+    outline_width: int = Field(default=2, ge=0, le=24)
+    shadow_color: Color = "#000000"
+    shadow_opacity: int = Field(default=0, ge=0, le=100)
+    shadow_blur: int = Field(default=4, ge=0, le=30)
+    shadow_x: int = Field(default=2, ge=-40, le=40)
+    shadow_y: int = Field(default=3, ge=-40, le=40)
+
+
 class GraphicLayer(BaseModel):
     id: Identifier
     kind: Literal["image", "text"]
+    hook: bool = False
+    anchor: Literal["free", "split"] = "free"
     name: str = Field(default="Capa", min_length=1, max_length=80)
+    auto_name: bool = False
+    hidden: bool = False
     asset_id: Identifier | None = None
     text: str = Field(default="", max_length=180)
-    font: Font = "Arial"
+    font: GraphicFont = "Arial"
     color: Color = "#ffffff"
     x: float = Field(default=50, ge=0, le=100, allow_inf_nan=False)
     y: float = Field(default=18, ge=0, le=100, allow_inf_nan=False)
-    size: int = Field(default=24, ge=5, le=100)
+    size: int = Field(default=24, ge=5, le=220)
     opacity: int = Field(default=100, ge=0, le=100)
     start: float = Field(default=0, ge=0, le=3600, allow_inf_nan=False)
     end: float | None = Field(default=None, gt=0, le=3600, allow_inf_nan=False)
+    text_style: GraphicTextStyle | None = None
 
     @model_validator(mode="after")
     def interval(self):
+        if self.kind == "image" and (self.size > 100 or self.text_style is not None):
+            raise ValueError("El tamaño de una imagen debe estar entre 5% y 100%.")
         if self.end is not None and self.end <= self.start:
             raise ValueError("El final de la capa debe ser posterior al inicio.")
         return self
@@ -218,17 +247,18 @@ def subtitle_sidecar(cues, kind: Literal["srt", "vtt"]) -> str:
     return "\n".join(output) + "\n"
 
 
-def graphic_ass(layer: GraphicLayer, dimensions, end: float) -> str:
+def graphic_ass(layer: GraphicLayer, dimensions, end: float, seam: int | None = None) -> str:
     width, height = dimensions
-    font_size = max(8, round(min(width, height) * layer.size / 1000))
+    font_size = max(8, round(min(width, height) * layer.size / (1080 if layer.hook else 1000)))
     x = round(width * layer.x / 100)
-    y = round(height * layer.y / 100)
-    appearance = CaptionStyle(font=layer.font, color=layer.color, size=24)
+    y = seam if layer.anchor == "split" and seam is not None else round(height * layer.y / 100)
+    appearance = CaptionStyle(color=layer.color, size=24)
     header = ass_script([], appearance, dimensions, 0, 0).splitlines()
     foreground = color_ass(layer.color, layer.opacity)
-    outline = color_ass("#000000", layer.opacity * .8)
+    outline = color_ass("#000000", layer.opacity if layer.hook else layer.opacity * .8)
     shadow = color_ass("#000000", layer.opacity * .45)
-    style = f"Style: Captions,{layer.font},{font_size},{foreground},{foreground},{outline},{shadow},-1,0,0,0,100,100,0,0,1,1.5,1,5,10,10,0,1"
+    border = f"{font_size * .068:.2f},0" if layer.hook else "1.5,1"
+    style = f"Style: Captions,{layer.font},{font_size},{foreground},{foreground},{outline},{shadow},-1,0,0,0,100,100,0,0,1,{border},5,10,10,0,1"
     header = [style if line.startswith("Style: Captions,") else line for line in header]
     text = f"{{\\an5\\pos({x},{y})}}" + literal_ass(layer.text)
     row = dialogue(layer.start, end, text)

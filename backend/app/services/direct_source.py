@@ -1,5 +1,5 @@
 """Resuelve canales públicos con los complementos integrados de Streamlink."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.util import find_spec
 import json
 import os
@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from .media import CREATE_NO_WINDOW
 from .obs import LiveError
+from .youtube_live import YOUTUBE_HOSTS, youtube_url
 
 QUALITY = re.compile(r"[0-9]{2,4}p[0-9]{0,3}(?:_alt[0-9]*)?|source|live")
 CHANNEL = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_-]{0,49}")
@@ -24,6 +25,9 @@ class DirectSource:
     platform: str
     channel: str
     url: str
+    name: str | None = None
+    manifest: str | None = field(default=None, repr=False)
+    verified_live: bool = False
 
 
 def source_from_url(url: str) -> DirectSource:
@@ -31,17 +35,20 @@ def source_from_url(url: str) -> DirectSource:
         parts = urlsplit(url.strip())
         host = parts.hostname or ""
         if (parts.scheme != "https" or parts.username is not None or parts.password is not None
-                or parts.port is not None or parts.query or parts.fragment or not parts.netloc
+                or parts.port is not None or parts.fragment or not parts.netloc
                 or parts.netloc.lower() != host):
+            raise ValueError
+        if host in YOUTUBE_HOSTS:
+            canonical, channel = youtube_url(parts)
+            return DirectSource("youtube", channel, canonical)
+        if parts.query:
             raise ValueError
     except ValueError as exc:
         raise LiveError("direct_url", "Usa la URL HTTPS de un canal, sin parámetros ni credenciales.", 422) from exc
-    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
-        raise LiveError("direct_youtube", "YouTube Live está en evaluación. Usa Kick, Twitch o el método OBS.", 422)
     platforms = {"kick.com": "kick", "www.kick.com": "kick", "twitch.tv": "twitch", "www.twitch.tv": "twitch"}
     channel = parts.path.removeprefix("/").removesuffix("/")
     if host not in platforms or not CHANNEL.fullmatch(channel) or channel.lower() in {"videos", "clips", "directory", "search", "embed", "login"}:
-        raise LiveError("direct_url", "Usa la URL de un canal de Kick o Twitch, como https://www.twitch.tv/tu_canal.", 422)
+        raise LiveError("direct_url", "Usa la URL HTTPS de un canal de Kick, Twitch o YouTube Live.", 422)
     platform = platforms[host]
     channel = channel.lower()
     canonical = "kick.com" if platform == "kick" else "www.twitch.tv"
@@ -74,6 +81,9 @@ def terminate_tree(process: subprocess.Popen) -> None:
 
 
 class StreamlinkSource:
+    def __init__(self, ffmpeg: str | None = None):
+        self.ffmpeg = ffmpeg
+
     def available(self) -> bool:
         return find_spec("streamlink") is not None
 
@@ -81,12 +91,23 @@ class StreamlinkSource:
         if not self.available():
             raise LiveError("streamlink_missing", "Instala Streamlink con .\\.venv\\Scripts\\python.exe -m pip install -r backend/requirements-live.txt.", 503)
 
-    def command(self) -> list[str]:
+    def command(self, source: DirectSource | None = None) -> list[str]:
         self.require()
+        youtube = source is not None and source.platform == "youtube"
+        mux = ["--ffmpeg-ffmpeg", self.ffmpeg, "--ffmpeg-fout", "mpegts"] if youtube and self.ffmpeg else []
         return [sys.executable, "-I", "-m", "streamlink", "--no-config", "--no-plugin-cache", "--no-plugin-sideloading",
                 "--webbrowser", "no", "--http-ignore-env", "--http-timeout", "6", "--stream-timeout", "12",
-                "--stream-types", "hls", "--stream-segment-attempts", "2", "--stream-segment-timeout", "6",
-                "--stream-segment-threads", "2", "--retry-open", "1"]
+                "--stream-types", "hls,hls-multi" if youtube else "hls", *mux,
+                "--stream-segment-attempts", "2", "--stream-segment-timeout", "6",
+                "--stream-segment-threads", "2", "--ringbuffer-size", "16M", "--retry-open", "1"]
+
+    @staticmethod
+    def input_url(source: DirectSource) -> str:
+        if source.platform != "youtube":
+            return source.url
+        if not source.verified_live:
+            raise LiveError("direct_access", "Confirma que el directo de YouTube esté activo y sea público.", 403)
+        return "hls://" + source.manifest if source.manifest else source.url
 
     @staticmethod
     def spawn(command: list[str], *, stderr=subprocess.DEVNULL) -> subprocess.Popen:
@@ -95,7 +116,7 @@ class StreamlinkSource:
                                 creationflags=CREATE_NO_WINDOW, start_new_session=os.name != "nt", env=env)
 
     def inspect(self, source: DirectSource, cancelled: Event | None = None) -> list[str]:
-        command = [*self.command(), "--json", "--", source.url]
+        command = [*self.command(source), "--json", "--", self.input_url(source)]
         deadline = monotonic() + 14
         try:
             with self.spawn(command, stderr=subprocess.PIPE) as process:
@@ -141,5 +162,5 @@ class StreamlinkSource:
     def open(self, source: DirectSource, quality: str) -> subprocess.Popen:
         if not QUALITY.fullmatch(quality):
             raise LiveError("direct_quality", "Selecciona una calidad de vídeo disponible.", 422)
-        return self.spawn([*self.command(), "--loglevel", "error", "--stdout", "--", source.url, quality])
+        return self.spawn([*self.command(source), "--loglevel", "error", "--stdout", "--", self.input_url(source), quality])
 

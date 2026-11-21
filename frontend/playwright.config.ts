@@ -3,6 +3,7 @@ import path from 'node:path';
 
 const port = 8013;
 const baseURL = `http://127.0.0.1:${port}`;
+const testStorage = path.resolve('../test-results/e2e-data', Date.now().toString());
 
 export default defineConfig({
   testDir: './tests',
@@ -24,7 +25,7 @@ export default defineConfig({
     command: `"../.venv/Scripts/python.exe" -m uvicorn app.main:app --app-dir ../backend --host 127.0.0.1 --port ${port}`,
     url: `${baseURL}/api/health`,
     reuseExistingServer: false,
-    env: { CLIPZONE_DATA_DIR: path.resolve('../test-results/e2e-data', Date.now().toString()), PYTHONUTF8: '1' },
+    env: { CLIPZONE_DATA_DIR: path.join(testStorage, 'data'), CLIPZONE_STORAGE_CONFIG: path.join(testStorage, 'location.json'), PYTHONUTF8: '1' },
     timeout: 20_000,
   },
 });

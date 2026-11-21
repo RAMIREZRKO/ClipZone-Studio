@@ -8,12 +8,14 @@ import time
 import uuid
 
 from ..database import Database, now
+from ..storage_location import DRAFT_LIMIT
 from .media import CREATE_NO_WINDOW
 
 
 class JobQueue:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, storage=None):
         self.db = db
+        self.storage = storage
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="clipzone-render")
         self.lock = Lock()
         self.processes: dict[str, subprocess.Popen] = {}
@@ -34,7 +36,7 @@ class JobQueue:
                         db.put("videos", video)
 
     def submit(self, *, kind: str, video_id: str, command: list[str], output: Path, duration: float,
-               title: str, settings: dict | None = None, auxiliary: dict[str, str] | None = None,
+               title: str, settings: dict | None = None, auxiliary: dict[str, str | bytes] | None = None,
                sidecar_cues: list[dict] | None = None) -> dict:
         job = {"id": uuid.uuid4().hex, "kind": kind, "video_id": video_id, "title": title,
                "status": "queued", "progress": 0, "error": None, "created_at": now(), "updated_at": now(),
@@ -51,19 +53,25 @@ class JobQueue:
         self.db.put("jobs", job)
         return job
 
-    def _run(self, identifier: str, command: list[str], output: Path, duration: float, auxiliary: dict[str, str] | None):
+    def _run(self, identifier: str, command: list[str], output: Path, duration: float, auxiliary: dict[str, str | bytes] | None):
         error = None
         workspace = None
+        draft = False
         try:
             with self.lock:
                 job = self.db.get("jobs", identifier)
                 if not job or job["status"] == "cancelled" or self.closed:
                     return
+                draft = job["kind"] == "draft"
                 self._update(identifier, status="running")
                 if auxiliary:
                     workspace = tempfile.TemporaryDirectory(prefix="clipzone-render-")
                     for name, contents in auxiliary.items():
-                        (Path(workspace.name) / name).write_text(contents, encoding="utf-8")
+                        path = Path(workspace.name) / name
+                        if isinstance(contents, bytes):
+                            path.write_bytes(contents)
+                        else:
+                            path.write_text(contents, encoding="utf-8")
                 stderr_file = tempfile.TemporaryFile(mode="w+b")
                 try:
                     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr_file,
@@ -76,6 +84,10 @@ class JobQueue:
             last_update = 0.0
             for line in process.stdout:
                 if line.startswith("out_time_us=") and time.monotonic() - last_update > 0.4:
+                    if draft and output.is_file() and output.stat().st_size > DRAFT_LIMIT:
+                        error = "La vista exacta supera el máximo de 1 GB. Reduce la duración o la resolución."
+                        process.terminate()
+                        break
                     try:
                         progress = min(99, max(0, int(float(line.strip().split("=")[1]) / 1_000_000 / duration * 100)))
                     except ValueError:
@@ -89,7 +101,7 @@ class JobQueue:
             details = stderr_file.read().decode("utf-8", errors="replace")[-2000:]
             stderr_file.close()
             process.stdout.close()
-            if process.returncode != 0:
+            if process.returncode != 0 and not error:
                 error = f"FFmpeg no pudo completar el vídeo: {details or 'proceso interrumpido'}"
         except Exception as exc:
             error = str(exc)
@@ -105,6 +117,14 @@ class JobQueue:
                 job = self.db.get("jobs", identifier)
                 if not job:
                     return
+                if not error and draft and job["status"] != "cancelled" and output.is_file():
+                    size = output.stat().st_size
+                    if size > DRAFT_LIMIT:
+                        error = "La vista exacta supera el máximo de 1 GB. Reduce la duración o la resolución."
+                    elif self.storage:
+                        _, _, remaining = self.storage.prune_drafts(set(self.processes), reserve=size)
+                        if remaining + size > DRAFT_LIMIT:
+                            error = "No se pudo liberar espacio en la caché de vistas exactas. Cierra las vistas abiertas y reintenta."
                 if job["status"] == "cancelled":
                     output.unlink(missing_ok=True)
                 elif error:

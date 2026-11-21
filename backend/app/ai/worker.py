@@ -10,7 +10,7 @@ def emit(progress: int, stage: str):
     print(json.dumps({"progress": progress, "stage": stage}), flush=True)
 
 
-def run(audio: Path, model: Path, language: str, output: Path):
+def run(audio: Path, model: Path, language: str, output: Path, live_evidence: bool = False):
     import numpy as np
     import torch
     from .whisper_local import WhisperLocal
@@ -40,7 +40,11 @@ def run(audio: Path, model: Path, language: str, output: Path):
                     for word in segment.get("words", []):
                         start, end = max(0, float(word["start"]) + offset), min(duration, float(word["end"]) + offset)
                         if end > start and str(word["word"]).strip():
-                            words.append({"text": word["word"].strip(), "start": round(start, 3), "end": round(end, 3)})
+                            timed = {"text": word["word"].strip(), "start": round(start, 3), "end": round(end, 3)}
+                            if live_evidence:
+                                timed.update(probability=word.get("probability", 0),
+                                             no_speech=segment.get("no_speech_prob", 0))
+                            words.append(timed)
             offset += len(samples) / 16000
             emit(min(92, 25 + int(offset / max(duration, .01) * 67)), "Transcribiendo audio")
     output.write_text(json.dumps({"words": words, "language": detected_language or language,
@@ -53,9 +57,10 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--language", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--live-evidence", action="store_true")
     args = parser.parse_args()
     try:
-        run(args.audio, args.model, args.language, args.output)
+        run(args.audio, args.model, args.language, args.output, args.live_evidence)
     except Exception as exc:
         print(f"No se pudo transcribir con Whisper: {exc}", file=sys.stderr, flush=True)
         raise SystemExit(1)

@@ -18,11 +18,14 @@ tools/
 *.dll
 *.msi
 *.zip
+!/backend/app/emoji/twemoji-17.0.3.zip
 *.7z
 *.rar
 
 # Biblioteca, bases de datos, originales, proxies y exportaciones locales
 /data/
+/.clipzone-storage.json
+/.clipzone-storage.lock
 uploads/
 imports/
 originals/
